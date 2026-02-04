@@ -8,7 +8,6 @@ function hoursSince(dateMs: number) {
 
 export async function POST() {
   try {
-    // Only allow syncing every 24h unless you delete the meta key
     const metaKey = "players_nfl_last_sync_ms";
     const meta = await db.appMeta.findUnique({ where: { key: metaKey } });
 
@@ -22,31 +21,34 @@ export async function POST() {
     const players = await getAllNflPlayers();
     const entries = Object.entries(players);
 
-    // Upsert in chunks to avoid huge single queries
-    const CHUNK = 500;
+    // Smaller chunk + longer transaction timeout to avoid Prisma 5s rollback timeout
+    const CHUNK = 100;
+
     for (let i = 0; i < entries.length; i += CHUNK) {
       const slice = entries.slice(i, i + CHUNK);
 
-      await db.$transaction(
-        slice.map(([id, p]) =>
-          db.sleeperPlayer.upsert({
-            where: { id },
-            update: {
-              fullName: p?.full_name ?? null,
-              position: p?.position ?? null,
-              team: p?.team ?? null,
-              status: p?.status ?? null,
-            },
-            create: {
-              id,
-              fullName: p?.full_name ?? null,
-              position: p?.position ?? null,
-              team: p?.team ?? null,
-              status: p?.status ?? null,
-            },
-          })
-        )
+      const ops = slice.map(([id, p]) =>
+        db.sleeperPlayer.upsert({
+          where: { id },
+          update: {
+            fullName: p?.full_name ?? null,
+            position: p?.position ?? null,
+            team: p?.team ?? null,
+            status: p?.status ?? null,
+          },
+          create: {
+            id,
+            fullName: p?.full_name ?? null,
+            position: p?.position ?? null,
+            team: p?.team ?? null,
+            status: p?.status ?? null,
+          },
+        })
       );
+
+      // IMPORTANT: bump timeout (ms). If your Prisma version doesn't accept this,
+      // we’ll switch to non-transaction batching.
+      await db.$transaction(ops, { timeout: 60000, maxWait: 60000 });
     }
 
     await db.appMeta.upsert({
