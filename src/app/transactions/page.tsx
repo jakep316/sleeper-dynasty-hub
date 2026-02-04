@@ -1,5 +1,4 @@
 import { db } from "@/lib/db";
-import { getLeague } from "@/lib/sleeper";
 import FiltersClient from "./FiltersClient";
 
 export const dynamic = "force-dynamic";
@@ -8,7 +7,6 @@ const PAGE_SIZE = 50;
 
 type Props = {
   searchParams?: {
-    root?: string;
     season?: string;
     team?: string;
     type?: string;
@@ -26,49 +24,17 @@ function buildQueryString(params: Record<string, string | number | null | undefi
   return s ? `?${s}` : "";
 }
 
-async function getLeagueIdChain(startLeagueId: string, maxDepth = 25) {
-  const chain: Array<{ leagueId: string; season: number; previous: string | null }> = [];
-  const seen = new Set<string>();
-  let current: string | null = startLeagueId;
-
-  for (let i = 0; i < maxDepth && current; i++) {
-    if (seen.has(current)) break;
-    seen.add(current);
-
-    const meta = await getLeague(current);
-    chain.push({
-      leagueId: meta.league_id,
-      season: Number(meta.season),
-      previous: meta.previous_league_id ?? null,
-    });
-
-    current = meta.previous_league_id ?? null;
-  }
-
-  return chain;
-}
-
 export default async function TransactionsPage({ searchParams }: Props) {
-  const envRoot = process.env.SLEEPER_LEAGUE_ID!;
-  const rootParam = searchParams?.root ?? envRoot; // ✅ overrideable
+  const rootLeagueId = process.env.SLEEPER_LEAGUE_ID!;
 
   const seasonParam = searchParams?.season ?? "all";
   const teamParam = searchParams?.team ?? "all";
   const typeParam = searchParams?.type ?? "all";
   const page = Math.max(1, Number(searchParams?.page ?? 1));
 
-  // Chain based on selected root
-  const chain = await getLeagueIdChain(rootParam);
-  const leagueIds = chain.map((c) => c.leagueId);
-
-  // For roster labels: if season chosen, use that season's leagueId
-  const labelLeagueId =
-    seasonParam !== "all"
-      ? chain.find((c) => c.season === Number(seasonParam))?.leagueId ?? rootParam
-      : rootParam;
-
-  // DB query filters (across leagueIds in chain)
-  const where: any = { leagueId: { in: leagueIds } };
+  // For now, we query ONLY the current env leagueId.
+  // (Your "only 2026 + 2021" issue is a sync coverage issue — fixed in section B below.)
+  const where: any = { leagueId: rootLeagueId };
   if (seasonParam !== "all") where.season = Number(seasonParam);
   if (typeParam !== "all") where.type = typeParam;
 
@@ -77,16 +43,15 @@ export default async function TransactionsPage({ searchParams }: Props) {
     where.assets = { some: { OR: [{ fromRosterId: teamId }, { toRosterId: teamId }] } };
   }
 
-  // Dropdown seasons + types from DB (across chain)
   const [seasonRows, typeRows] = await Promise.all([
     db.transaction.findMany({
-      where: { leagueId: { in: leagueIds } },
+      where: { leagueId: rootLeagueId },
       distinct: ["season"],
       select: { season: true },
       orderBy: { season: "desc" },
     }),
     db.transaction.findMany({
-      where: { leagueId: { in: leagueIds } },
+      where: { leagueId: rootLeagueId },
       distinct: ["type"],
       select: { type: true },
     }),
@@ -108,7 +73,49 @@ export default async function TransactionsPage({ searchParams }: Props) {
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
-  // Player map for playerIds shown on this page
+  // ---- Build roster -> owner label map per (leagueId, season) used on this page ----
+  const leagueSeasonPairs = Array.from(
+    new Set(transactions.map((t) => `${t.leagueId}::${t.season}`))
+  ).map((k) => {
+    const [leagueId, seasonStr] = k.split("::");
+    return { leagueId, season: Number(seasonStr) };
+  });
+
+  const rosterRows = await db.roster.findMany({
+    where: {
+      OR: leagueSeasonPairs.map((p) => ({ leagueId: p.leagueId, season: p.season })),
+    },
+    select: { leagueId: true, season: true, rosterId: true, ownerId: true },
+  });
+
+  const ownerIds = Array.from(
+    new Set(rosterRows.map((r) => r.ownerId).filter((x): x is string => !!x))
+  );
+
+  const owners =
+    ownerIds.length > 0
+      ? await db.sleeperUser.findMany({
+          where: { sleeperUserId: { in: ownerIds } },
+          select: { sleeperUserId: true, displayName: true, username: true },
+        })
+      : [];
+
+  const ownerMap = new Map(owners.map((o) => [o.sleeperUserId, o]));
+
+  // key: leagueId::season::rosterId => label
+  const rosterLabelMap = new Map<string, string>();
+  for (const r of rosterRows) {
+    const o = r.ownerId ? ownerMap.get(r.ownerId) : null;
+    const label = o?.displayName || o?.username ? (o.displayName ?? o.username)! : `Roster ${r.rosterId}`;
+    rosterLabelMap.set(`${r.leagueId}::${r.season}::${r.rosterId}`, label);
+  }
+
+  const rosterLabel = (leagueId: string, season: number, rosterId: number | null) => {
+    if (rosterId === null || rosterId === undefined) return "—";
+    return rosterLabelMap.get(`${leagueId}::${season}::${rosterId}`) ?? `Roster ${rosterId}`;
+  };
+
+  // ---- Player map for playerIds shown on this page ----
   const playerIds = Array.from(
     new Set(
       transactions
@@ -145,66 +152,59 @@ export default async function TransactionsPage({ searchParams }: Props) {
     return a.kind ?? "asset";
   };
 
-  // Roster dropdown labels for the selected season (or newest season we have)
-  const seasonForRosterLabels =
+  // Team dropdown options (current season in this league)
+  const seasonForRosterDropdown =
     seasonParam !== "all" ? Number(seasonParam) : seasons[0] ?? new Date().getFullYear();
 
-  const rosterRows = await db.roster.findMany({
-    where: { leagueId: labelLeagueId, season: seasonForRosterLabels },
+  const rosterRowsForDropdown = await db.roster.findMany({
+    where: { leagueId: rootLeagueId, season: seasonForRosterDropdown },
     select: { rosterId: true, ownerId: true },
     orderBy: { rosterId: "asc" },
   });
 
-  const ownerIds = Array.from(
-    new Set(rosterRows.map((r) => r.ownerId).filter((x): x is string => !!x))
-  );
-
-  const owners =
-    ownerIds.length > 0
-      ? await db.sleeperUser.findMany({
-          where: { sleeperUserId: { in: ownerIds } },
-          select: { sleeperUserId: true, displayName: true, username: true },
-        })
-      : [];
-
-  const ownerMap = new Map(owners.map((o) => [o.sleeperUserId, o]));
-
   const rosterOptions =
-    rosterRows.length > 0
-      ? rosterRows.map((r) => {
-          const o = r.ownerId ? ownerMap.get(r.ownerId) : null;
-          const label =
-            o?.displayName || o?.username
-              ? `${o.displayName ?? o.username} (Roster ${r.rosterId})`
-              : `Roster ${r.rosterId}`;
-          return { id: r.rosterId, label };
-        })
+    rosterRowsForDropdown.length > 0
+      ? rosterRowsForDropdown.map((r) => ({
+          id: r.rosterId,
+          label: rosterLabel(rootLeagueId, seasonForRosterDropdown, r.rosterId),
+        }))
       : Array.from({ length: 20 }, (_, i) => ({ id: i + 1, label: `Roster ${i + 1}` }));
 
-  const common = { root: rootParam, season: seasonParam, team: teamParam, type: typeParam };
+  const common = { season: seasonParam, team: teamParam, type: typeParam };
+
+  const summarizeTeams = (t: any) => {
+    const from = new Set<number>();
+    const to = new Set<number>();
+
+    for (const a of t.assets) {
+      if (typeof a.fromRosterId === "number") from.add(a.fromRosterId);
+      if (typeof a.toRosterId === "number") to.add(a.toRosterId);
+    }
+
+    // If no movement, show em dash
+    if (from.size === 0 && to.size === 0) return "—";
+
+    const fromLabels = Array.from(from).map((rid) => rosterLabel(t.leagueId, t.season, rid));
+    const toLabels = Array.from(to).map((rid) => rosterLabel(t.leagueId, t.season, rid));
+
+    // Basic pretty formatting
+    const left = fromLabels.length ? fromLabels.join(", ") : "—";
+    const right = toLabels.length ? toLabels.join(", ") : "—";
+
+    return `${left} → ${right}`;
+  };
 
   return (
     <main className="mx-auto max-w-6xl p-6 space-y-6">
       <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
         <h1 className="text-2xl font-bold">Transactions</h1>
         <p className="mt-1 text-sm text-zinc-600">
-          Root: <span className="font-mono">{rootParam}</span> • Chain seasons:{" "}
-          {chain.map((c) => c.season).join(" → ")} • DB rows matched:{" "}
-          <span className="font-semibold text-zinc-900">{totalCount}</span>
+          Showing data for league <span className="font-mono">{rootLeagueId}</span>
         </p>
-
-        {rootParam !== envRoot && (
-          <p className="mt-2 text-xs text-zinc-500">
-            You’re viewing a test root.{" "}
-            <a className="underline" href="/transactions">
-              Back to default
-            </a>
-          </p>
-        )}
       </div>
 
       <FiltersClient
-        rootParam={rootParam}
+        rootParam={rootLeagueId}
         seasonParam={seasonParam}
         teamParam={teamParam}
         typeParam={typeParam}
@@ -255,6 +255,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
               <th className="text-left p-3">Week</th>
               <th className="text-left p-3">Date</th>
               <th className="text-left p-3">Type</th>
+              <th className="text-left p-3">Teams</th>
               <th className="text-left p-3">Assets</th>
             </tr>
           </thead>
@@ -268,16 +269,17 @@ export default async function TransactionsPage({ searchParams }: Props) {
                   {new Date(t.createdAt).toLocaleDateString()}
                 </td>
                 <td className="p-3 capitalize whitespace-nowrap">{t.type}</td>
+                <td className="p-3 whitespace-nowrap">{summarizeTeams(t)}</td>
                 <td className="p-3">
                   {t.assets.length === 0 ? (
                     <span className="text-zinc-400">No assets recorded</span>
                   ) : (
                     <ul className="space-y-1">
-                      {t.assets.slice(0, 12).map((a: any, i: number) => (
+                      {t.assets.slice(0, 10).map((a: any, i: number) => (
                         <li key={i}>{renderAsset(a)}</li>
                       ))}
-                      {t.assets.length > 12 && (
-                        <li className="text-zinc-400">…and {t.assets.length - 12} more</li>
+                      {t.assets.length > 10 && (
+                        <li className="text-zinc-400">…and {t.assets.length - 10} more</li>
                       )}
                     </ul>
                   )}
@@ -287,15 +289,8 @@ export default async function TransactionsPage({ searchParams }: Props) {
 
             {transactions.length === 0 && (
               <tr>
-                <td className="p-6 text-zinc-600" colSpan={5}>
+                <td className="p-6 text-zinc-600" colSpan={6}>
                   No transactions found with the current filters.
-                  <div className="mt-2 text-xs text-zinc-500">
-                    Tip: open{" "}
-                    <span className="font-mono">
-                      /transactions?root=1312020031621591040
-                    </span>{" "}
-                    to view the test league chain.
-                  </div>
                 </td>
               </tr>
             )}
