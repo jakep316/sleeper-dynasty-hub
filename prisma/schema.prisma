@@ -1,0 +1,177 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // url moved to prisma.config.ts in Prisma 7
+}
+
+model AppUser {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  claims   RosterClaim[]
+  notes    TradeNote[]
+  accounts Account[]
+  sessions Session[]
+}
+
+model LeagueSeason {
+  id               String   @id @default(cuid())
+  leagueId         String
+  season           Int
+  previousLeagueId String?
+  createdAt        DateTime @default(now())
+
+  @@unique([leagueId, season])
+}
+
+model SleeperUser {
+  sleeperUserId String   @id
+  username      String?
+  displayName   String?
+  avatar        String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  rosters Roster[]
+}
+
+model Roster {
+  id           String       @id @default(cuid())
+  leagueId     String
+  season       Int
+  rosterId     Int
+  ownerId      String?
+  owner        SleeperUser? @relation(fields: [ownerId], references: [sleeperUserId])
+  settingsJson Json?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  claims   RosterClaim[]
+  matchups Matchup[]
+
+  @@unique([leagueId, season, rosterId])
+}
+
+model Matchup {
+  id        String   @id @default(cuid())
+  leagueId  String
+  season    Int
+  week      Int
+  matchupId Int?
+  rosterId  Int
+  points    Float?
+  createdAt DateTime @default(now())
+
+  roster Roster? @relation(fields: [leagueId, season, rosterId], references: [leagueId, season, rosterId], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([leagueId, season, week, rosterId])
+  @@index([leagueId, season, week])
+}
+
+model Transaction {
+  id          String   @id
+  leagueId    String
+  season      Int
+  week        Int
+  type        String
+  status      String
+  createdAtMs BigInt?
+  updatedAtMs BigInt?
+  rawJson     Json
+  createdAt   DateTime @default(now())
+
+  assets TransactionAsset[]
+  notes  TradeNote[]
+
+  @@index([leagueId, season, week])
+}
+
+model TransactionAsset {
+  id            String  @id @default(cuid())
+  transactionId String
+  kind          String // player | pick | faab | player_drop
+  fromRosterId  Int?
+  toRosterId    Int?
+  playerId      String?
+  pickSeason    Int?
+  pickRound     Int?
+  faabAmount    Int?
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+}
+
+model RosterClaim {
+  id           String   @id @default(cuid())
+  leagueId     String
+  season       Int
+  rosterId     Int
+  appUserId    String
+  claimedAt    DateTime @default(now())
+  lastActiveAt DateTime @default(now())
+
+  appUser AppUser @relation(fields: [appUserId], references: [id], onDelete: Cascade)
+  roster  Roster  @relation(fields: [leagueId, season, rosterId], references: [leagueId, season, rosterId], onDelete: Cascade)
+
+  @@unique([leagueId, season, rosterId])
+  @@index([appUserId])
+}
+
+model TradeNote {
+  id            String   @id @default(cuid())
+  transactionId String
+  appUserId     String
+  body          String
+  createdAt     DateTime @default(now())
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  appUser     AppUser     @relation(fields: [appUserId], references: [id], onDelete: Cascade)
+}
+
+/**
+ * Auth.js adapter models
+ */
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
