@@ -15,8 +15,7 @@ export async function GET(req: Request) {
       db.transaction.groupBy({
         by: ["leagueId"],
         where,
-        _count: { _all: true },
-        orderBy: { _count: { _all: "desc" } },
+        _count: true,
       }),
       db.transaction.findFirst({
         where,
