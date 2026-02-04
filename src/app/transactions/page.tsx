@@ -8,6 +8,7 @@ const PAGE_SIZE = 50;
 
 type Props = {
   searchParams?: {
+    root?: string;
     season?: string;
     team?: string;
     type?: string;
@@ -48,25 +49,25 @@ async function getLeagueIdChain(startLeagueId: string, maxDepth = 25) {
 }
 
 export default async function TransactionsPage({ searchParams }: Props) {
-  const rootLeagueId = process.env.SLEEPER_LEAGUE_ID!;
+  const envRoot = process.env.SLEEPER_LEAGUE_ID!;
+  const rootParam = searchParams?.root ?? envRoot; // ✅ overrideable
 
   const seasonParam = searchParams?.season ?? "all";
   const teamParam = searchParams?.team ?? "all";
   const typeParam = searchParams?.type ?? "all";
   const page = Math.max(1, Number(searchParams?.page ?? 1));
 
-  // Build chain with season mapping
-  const chain = await getLeagueIdChain(rootLeagueId);
+  // Chain based on selected root
+  const chain = await getLeagueIdChain(rootParam);
   const leagueIds = chain.map((c) => c.leagueId);
 
-  // Determine which leagueId to use for roster label lookups
-  // If user selects a season, use the leagueId that matches that season.
+  // For roster labels: if season chosen, use that season's leagueId
   const labelLeagueId =
     seasonParam !== "all"
-      ? chain.find((c) => c.season === Number(seasonParam))?.leagueId ?? rootLeagueId
-      : rootLeagueId;
+      ? chain.find((c) => c.season === Number(seasonParam))?.leagueId ?? rootParam
+      : rootParam;
 
-  // Filters for DB query (across ALL leagueIds)
+  // DB query filters (across leagueIds in chain)
   const where: any = { leagueId: { in: leagueIds } };
   if (seasonParam !== "all") where.season = Number(seasonParam);
   if (typeParam !== "all") where.type = typeParam;
@@ -76,7 +77,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
     where.assets = { some: { OR: [{ fromRosterId: teamId }, { toRosterId: teamId }] } };
   }
 
-  // Dropdown seasons + types from DB (across the chain)
+  // Dropdown seasons + types from DB (across chain)
   const [seasonRows, typeRows] = await Promise.all([
     db.transaction.findMany({
       where: { leagueId: { in: leagueIds } },
@@ -94,7 +95,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
   const seasons = seasonRows.map((s) => s.season);
   const types = (typeRows.map((t) => t.type).filter(Boolean) as string[]).sort();
 
-  // Query transactions
   const [totalCount, transactions] = await Promise.all([
     db.transaction.count({ where }),
     db.transaction.findMany({
@@ -145,7 +145,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
     return a.kind ?? "asset";
   };
 
-  // Roster dropdown labels (use the leagueId for the selected season)
+  // Roster dropdown labels for the selected season (or newest season we have)
   const seasonForRosterLabels =
     seasonParam !== "all" ? Number(seasonParam) : seasons[0] ?? new Date().getFullYear();
 
@@ -181,18 +181,30 @@ export default async function TransactionsPage({ searchParams }: Props) {
         })
       : Array.from({ length: 20 }, (_, i) => ({ id: i + 1, label: `Roster ${i + 1}` }));
 
-  const common = { season: seasonParam, team: teamParam, type: typeParam };
+  const common = { root: rootParam, season: seasonParam, team: teamParam, type: typeParam };
 
   return (
     <main className="mx-auto max-w-6xl p-6 space-y-6">
       <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
         <h1 className="text-2xl font-bold">Transactions</h1>
         <p className="mt-1 text-sm text-zinc-600">
-          League chain: {chain.map((c) => `${c.season}`).join(" → ")} (count: {chain.length})
+          Root: <span className="font-mono">{rootParam}</span> • Chain seasons:{" "}
+          {chain.map((c) => c.season).join(" → ")} • DB rows matched:{" "}
+          <span className="font-semibold text-zinc-900">{totalCount}</span>
         </p>
+
+        {rootParam !== envRoot && (
+          <p className="mt-2 text-xs text-zinc-500">
+            You’re viewing a test root.{" "}
+            <a className="underline" href="/transactions">
+              Back to default
+            </a>
+          </p>
+        )}
       </div>
 
       <FiltersClient
+        rootParam={rootParam}
         seasonParam={seasonParam}
         teamParam={teamParam}
         typeParam={typeParam}
@@ -277,6 +289,13 @@ export default async function TransactionsPage({ searchParams }: Props) {
               <tr>
                 <td className="p-6 text-zinc-600" colSpan={5}>
                   No transactions found with the current filters.
+                  <div className="mt-2 text-xs text-zinc-500">
+                    Tip: open{" "}
+                    <span className="font-mono">
+                      /transactions?root=1312020031621591040
+                    </span>{" "}
+                    to view the test league chain.
+                  </div>
                 </td>
               </tr>
             )}

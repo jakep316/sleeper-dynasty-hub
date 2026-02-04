@@ -13,6 +13,7 @@ function buildQueryString(params: Record<string, string | number | null | undefi
 }
 
 export default function FiltersClient({
+  rootParam,
   seasonParam,
   teamParam,
   typeParam,
@@ -20,6 +21,7 @@ export default function FiltersClient({
   types,
   rosters,
 }: {
+  rootParam: string;
   seasonParam: string;
   teamParam: string;
   typeParam: string;
@@ -30,6 +32,7 @@ export default function FiltersClient({
   const router = useRouter();
 
   const base = {
+    root: rootParam,
     season: seasonParam,
     team: teamParam,
     type: typeParam,
@@ -94,7 +97,7 @@ export default function FiltersClient({
         </div>
 
         <a
-          href="/transactions"
+          href={`/transactions${buildQueryString({ root: rootParam })}`}
           className="ml-auto rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-zinc-50"
         >
           Clear
