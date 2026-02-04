@@ -6,6 +6,22 @@ function hoursSince(dateMs: number) {
   return (Date.now() - dateMs) / (1000 * 60 * 60);
 }
 
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>
+) {
+  let i = 0;
+  const runners = Array.from({ length: concurrency }, async () => {
+    while (true) {
+      const idx = i++;
+      if (idx >= items.length) return;
+      await worker(items[idx], idx);
+    }
+  });
+  await Promise.all(runners);
+}
+
 export async function POST() {
   try {
     const metaKey = "players_nfl_last_sync_ms";
@@ -21,35 +37,27 @@ export async function POST() {
     const players = await getAllNflPlayers();
     const entries = Object.entries(players);
 
-    // Smaller chunk + longer transaction timeout to avoid Prisma 5s rollback timeout
-    const CHUNK = 100;
+    // Limit concurrency to avoid hammering DB / timing out
+    const CONCURRENCY = 10;
 
-    for (let i = 0; i < entries.length; i += CHUNK) {
-      const slice = entries.slice(i, i + CHUNK);
-
-      const ops = slice.map(([id, p]) =>
-        db.sleeperPlayer.upsert({
-          where: { id },
-          update: {
-            fullName: p?.full_name ?? null,
-            position: p?.position ?? null,
-            team: p?.team ?? null,
-            status: p?.status ?? null,
-          },
-          create: {
-            id,
-            fullName: p?.full_name ?? null,
-            position: p?.position ?? null,
-            team: p?.team ?? null,
-            status: p?.status ?? null,
-          },
-        })
-      );
-
-      // IMPORTANT: bump timeout (ms). If your Prisma version doesn't accept this,
-      // we’ll switch to non-transaction batching.
-      await db.$transaction(ops, { timeout: 60000, maxWait: 60000 });
-    }
+    await runWithConcurrency(entries, CONCURRENCY, async ([id, p]) => {
+      await db.sleeperPlayer.upsert({
+        where: { id },
+        update: {
+          fullName: p?.full_name ?? null,
+          position: p?.position ?? null,
+          team: p?.team ?? null,
+          status: p?.status ?? null,
+        },
+        create: {
+          id,
+          fullName: p?.full_name ?? null,
+          position: p?.position ?? null,
+          team: p?.team ?? null,
+          status: p?.status ?? null,
+        },
+      });
+    });
 
     await db.appMeta.upsert({
       where: { key: metaKey },
