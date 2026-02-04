@@ -33,6 +33,10 @@ function prettyType(type: string) {
     .join(" ");
 }
 
+function uniq<T>(arr: T[]) {
+  return Array.from(new Set(arr));
+}
+
 export default async function TransactionsPage({ searchParams }: Props) {
   const leagueId = process.env.SLEEPER_LEAGUE_ID!;
 
@@ -101,8 +105,8 @@ export default async function TransactionsPage({ searchParams }: Props) {
         })
       : [];
 
-  const ownerIds = Array.from(
-    new Set(rosterRows.map((r) => r.ownerId).filter((x): x is string => !!x))
+  const ownerIds = uniq(
+    rosterRows.map((r) => r.ownerId).filter((x): x is string => !!x)
   );
 
   const owners =
@@ -127,13 +131,11 @@ export default async function TransactionsPage({ searchParams }: Props) {
   };
 
   // ---- Player map for page ----
-  const playerIds = Array.from(
-    new Set(
-      transactions
-        .flatMap((t) => t.assets)
-        .map((a) => a.playerId)
-        .filter((x): x is string => typeof x === "string" && x.length > 0)
-    )
+  const playerIds = uniq(
+    transactions
+      .flatMap((t) => t.assets)
+      .map((a) => a.playerId)
+      .filter((x): x is string => typeof x === "string" && x.length > 0)
   );
 
   const players =
@@ -154,6 +156,20 @@ export default async function TransactionsPage({ searchParams }: Props) {
     return parts.length ? `${name} (${parts.join(", ")})` : name;
   };
 
+  const pickLabel = (a: any) => {
+    // pickSeason is Int in your schema now
+    const ys = typeof a.pickSeason === "number" ? String(a.pickSeason) : "?";
+    const rd = typeof a.pickRound === "number" ? String(a.pickRound) : "?";
+    return `${ys} R${rd}`;
+  };
+
+  const assetLabel = (a: any) => {
+    if (a.kind === "pick") return pickLabel(a);
+    if (a.kind === "faab") return `FAAB $${a.faabAmount ?? 0}`;
+    if (a.playerId) return playerLabel(a.playerId);
+    return a.kind ?? "asset";
+  };
+
   // ---- Team dropdown options (current selected season or newest) ----
   const seasonForRosterDropdown =
     seasonParam !== "all" ? Number(seasonParam) : seasons[0] ?? new Date().getFullYear();
@@ -172,47 +188,104 @@ export default async function TransactionsPage({ searchParams }: Props) {
         }))
       : Array.from({ length: 20 }, (_, i) => ({ id: i + 1, label: `Roster ${i + 1}` }));
 
-  // ---- Helpers for table columns ----
+  // ---- Column renderers ----
+
   function getTeamsString(t: any) {
-    const from = new Set<number>();
-    const to = new Set<number>();
+    // For trades: only show unique teams involved in cross-roster moves
+    if (t.type === "trade") {
+      const involved: number[] = [];
+      for (const a of t.assets) {
+        const from = a.fromRosterId;
+        const to = a.toRosterId;
+        if (typeof from === "number") involved.push(from);
+        if (typeof to === "number") involved.push(to);
+      }
+
+      const uniqueTeams = uniq(involved).map((rid) => rosterLabel(t.leagueId, t.season, rid));
+
+      // Remove "—" if it appears (it shouldn't for trades but just in case)
+      const clean = uniqueTeams.filter((x) => x !== "—");
+
+      // If it’s exactly 2 teams: A ↔ B
+      if (clean.length === 2) return `${clean[0]} ↔ ${clean[1]}`;
+
+      // Multi-team trades happen sometimes; keep it readable
+      if (clean.length > 2) return clean.join(" ↔ ");
+
+      return clean[0] ?? "—";
+    }
+
+    // Non-trade: show the team that did the move (from or to)
+    const fromTeams = new Set<number>();
+    const toTeams = new Set<number>();
 
     for (const a of t.assets) {
-      if (typeof a.fromRosterId === "number") from.add(a.fromRosterId);
-      if (typeof a.toRosterId === "number") to.add(a.toRosterId);
+      if (typeof a.fromRosterId === "number") fromTeams.add(a.fromRosterId);
+      if (typeof a.toRosterId === "number") toTeams.add(a.toRosterId);
     }
 
-    const fromLabels = Array.from(from).map((rid) => rosterLabel(t.leagueId, t.season, rid));
-    const toLabels = Array.from(to).map((rid) => rosterLabel(t.leagueId, t.season, rid));
+    const labels = uniq([
+      ...Array.from(fromTeams).map((rid) => rosterLabel(t.leagueId, t.season, rid)),
+      ...Array.from(toTeams).map((rid) => rosterLabel(t.leagueId, t.season, rid)),
+    ]).filter((x) => x !== "—");
 
-    // Trades: show A ↔ B
-    if (fromLabels.length && toLabels.length) {
-      const left = fromLabels.join(", ");
-      const right = toLabels.join(", ");
-      if (left !== right) return `${left} ↔ ${right}`;
-      // same team movement (add/drop) -> show just team
-      return left;
-    }
-
-    // Add only or drop only -> show the team involved
-    if (fromLabels.length) return fromLabels.join(", ");
-    if (toLabels.length) return toLabels.join(", ");
-    return "—";
+    // Usually 1 team for waivers/FA; if somehow multiple, show them
+    return labels.length ? labels.join(", ") : "—";
   }
 
   function getMoves(t: any) {
+    // TRADES: show what each team RECEIVED (players + picks + FAAB)
+    if (t.type === "trade") {
+      // Map rosterId -> received[] (anything with toRosterId = rosterId)
+      const received = new Map<number, string[]>();
+
+      for (const a of t.assets) {
+        const from = a.fromRosterId;
+        const to = a.toRosterId;
+
+        // Only care about actual movement between rosters
+        if (typeof from === "number" && typeof to === "number" && from !== to) {
+          const list = received.get(to) ?? [];
+          list.push(assetLabel(a));
+          received.set(to, list);
+        }
+      }
+
+      const teamIds = Array.from(received.keys()).sort((a, b) => a - b);
+
+      if (teamIds.length === 0) return <span className="text-zinc-400">—</span>;
+
+      return (
+        <div className="space-y-2">
+          {teamIds.map((rid) => {
+            const team = rosterLabel(t.leagueId, t.season, rid);
+            const items = received.get(rid) ?? [];
+            return (
+              <div key={rid} className="leading-snug">
+                <div className="font-semibold text-zinc-900">{team} received</div>
+                <div className="text-zinc-700">{items.join(", ")}</div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // NON-TRADES: show Added/Dropped (no arrows)
     const adds: string[] = [];
     const drops: string[] = [];
 
     for (const a of t.assets) {
+      // We only show player adds/drops in this UX (you can add FAAB here later if you want)
       if (!a.playerId) continue;
+
       const label = playerLabel(a.playerId);
 
       if (a.fromRosterId && !a.toRosterId) drops.push(label);
       if (!a.fromRosterId && a.toRosterId) adds.push(label);
     }
 
-    if (!adds.length && !drops.length) return null;
+    if (!adds.length && !drops.length) return <span className="text-zinc-400">—</span>;
 
     return (
       <div className="space-y-1">
@@ -300,7 +373,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
                 </td>
                 <td className="p-3 whitespace-nowrap">{prettyType(t.type)}</td>
                 <td className="p-3 whitespace-nowrap">{getTeamsString(t)}</td>
-                <td className="p-3">{getMoves(t) ?? <span className="text-zinc-400">—</span>}</td>
+                <td className="p-3">{getMoves(t)}</td>
               </tr>
             ))}
 
