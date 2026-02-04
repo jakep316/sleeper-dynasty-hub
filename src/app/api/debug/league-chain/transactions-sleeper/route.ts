@@ -10,13 +10,9 @@ export async function GET(req: Request) {
     if (!leagueId) {
       return NextResponse.json({ ok: false, error: "Missing leagueId" }, { status: 400 });
     }
-    if (!Number.isFinite(week) || week < 0 || week > 25) {
-      return NextResponse.json({ ok: false, error: "Invalid week" }, { status: 400 });
-    }
 
     const txs = await getTransactions(leagueId, week);
 
-    // Return just a small sample so response isn't huge
     const sample = txs.slice(0, 3).map((t) => ({
       transaction_id: t.transaction_id,
       type: t.type,

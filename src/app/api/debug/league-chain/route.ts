@@ -25,6 +25,7 @@ export async function GET(req: Request) {
       seen.add(current);
 
       const meta = await getLeague(current);
+
       chain.push({
         league_id: meta.league_id,
         season: meta.season,
