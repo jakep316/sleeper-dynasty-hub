@@ -94,25 +94,27 @@ export async function POST(req: Request) {
 
       for (const t of txs) {
         await db.transaction.upsert({
-          where: { id: t.transaction_id },
-          update: {
-            leagueId,
-            season,
-            week,
-            type: t.type,
-            status: t.status,
-            createdAt: new Date(t.created),
-          },
-          create: {
-            id: t.transaction_id,
-            leagueId,
-            season,
-            week,
-            type: t.type,
-            status: t.status,
-            createdAt: new Date(t.created),
-          },
-        });
+  where: { id: t.transaction_id },
+  update: {
+    leagueId,
+    season,
+    week,
+    type: t.type,
+    status: t.status,
+    createdAt: new Date(t.created),
+    rawJson: t as any,
+  },
+  create: {
+    id: t.transaction_id,
+    leagueId,
+    season,
+    week,
+    type: t.type,
+    status: t.status,
+    createdAt: new Date(t.created),
+    rawJson: t as any,
+  },
+});
         txCount++;
 
         // Clear old assets so resync is deterministic
