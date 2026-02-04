@@ -25,3 +25,12 @@ export async function getTransactions(leagueId: string, round: number) {
 export async function getAllNflPlayers() {
   return getJson<Record<string, any>>(`/players/nfl`);
 }
+
+export async function getLeague(leagueId: string) {
+  return getJson<{ league_id: string; previous_league_id: string | null }>(`/league/${leagueId}`);
+}
+
+export const getLeagueUsers = getUsers;
+export const getLeagueRosters = getRosters;
+export const getMatchupsForWeek = getMatchups;
+export const getTransactionsForWeek = getTransactions;
