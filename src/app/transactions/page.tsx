@@ -1,6 +1,14 @@
 import { db } from "@/lib/db";
 import { getRosterNameMap } from "@/lib/names";
 
+function Badge({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-xs font-semibold text-zinc-700">
+      {children}
+    </span>
+  );
+}
+
 export default async function TransactionsPage() {
   const leagueId = process.env.SLEEPER_LEAGUE_ID!;
   const seasonRow = await db.leagueSeason.findFirst({
@@ -10,27 +18,24 @@ export default async function TransactionsPage() {
 
   if (!seasonRow) {
     return (
-      <div style={{ padding: 24 }}>
-        <h1>Transactions</h1>
-        <p>No data yet. Run sync: POST /api/sync</p>
+      <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+        <h1 className="text-2xl font-semibold tracking-tight">Transactions</h1>
+        <p className="mt-2 text-sm text-zinc-600">No data yet. Run sync: POST /api/sync</p>
       </div>
     );
   }
 
   const season = seasonRow.season;
-
   const rosterNames = await getRosterNameMap(leagueId, season);
-  const nameOf = (rosterId: number | null) =>
-    rosterId == null ? "—" : rosterNames.get(rosterId) ?? `Roster ${rosterId}`;
+  const nameOf = (id: number | null) => (id == null ? "—" : rosterNames.get(id) ?? `Roster ${id}`);
 
   const txs = await db.transaction.findMany({
     where: { leagueId, season },
     orderBy: [{ week: "desc" }, { createdAt: "desc" }],
-    take: 100,
+    take: 50,
   });
 
   const txIds = txs.map((t) => t.id);
-
   const assets = txIds.length
     ? await db.transactionAsset.findMany({
         where: { transactionId: { in: txIds } },
@@ -46,45 +51,56 @@ export default async function TransactionsPage() {
   }
 
   return (
-    <div style={{ padding: 24 }}>
-      <h1>Transactions</h1>
-      <p>Season {season} • Latest 100</p>
+    <div className="grid gap-4">
+      <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+        <h1 className="text-2xl font-semibold tracking-tight">Transactions</h1>
+        <p className="mt-1 text-sm text-zinc-600">
+          Season {season} • Latest {txs.length}
+        </p>
+      </div>
 
-      <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+      <div className="grid gap-3">
         {txs.map((t) => {
           const a = assetsByTx.get(t.id) ?? [];
           return (
-            <div key={t.id} style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                <div style={{ fontWeight: 700 }}>
-                  Week {t.week} • {t.type} • {t.status}
+            <div key={t.id} className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="text-sm font-semibold">
+                    Week {t.week} <span className="text-zinc-300">•</span> {t.type}
+                  </div>
+                  <Badge>{t.status}</Badge>
                 </div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>{t.id}</div>
+                <div className="text-xs text-zinc-500">{t.id}</div>
               </div>
 
-              {a.length > 0 && (
-                <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
-                  {a.slice(0, 12).map((x, i) => {
+              {a.length > 0 ? (
+                <div className="mt-3 grid gap-2">
+                  {a.slice(0, 10).map((x, i) => {
                     const label =
                       x.kind === "pick"
                         ? `Pick ${x.pickSeason ?? "?"} R${x.pickRound ?? "?"}`
                         : x.kind === "faab"
                         ? `FAAB $${x.faabAmount ?? 0}`
                         : x.kind === "player" || x.kind === "player_drop"
-                        ? `Player ${x.playerId ?? ""}`
+                        ? `Player ${x.playerId ?? ""}` // next step: real player names
                         : x.kind;
 
                     return (
-                      <div key={`${t.id}-${i}`} style={{ fontSize: 13, opacity: 0.95 }}>
-                        {label} — {nameOf(x.fromRosterId)} → {nameOf(x.toRosterId)}
+                      <div key={`${t.id}-${i}`} className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-sm text-zinc-800">
+                          <span className="font-medium">{label}</span>
+                        </div>
+                        <div className="text-sm text-zinc-600">
+                          {nameOf(x.fromRosterId)} <span className="text-zinc-300">→</span> {nameOf(x.toRosterId)}
+                        </div>
                       </div>
                     );
                   })}
-
-                  {a.length > 12 && (
-                    <div style={{ fontSize: 13, opacity: 0.7 }}>…and {a.length - 12} more</div>
-                  )}
+                  {a.length > 10 && <div className="text-xs text-zinc-500">…and {a.length - 10} more</div>}
                 </div>
+              ) : (
+                <div className="mt-3 text-sm text-zinc-500">No asset details stored for this transaction.</div>
               )}
             </div>
           );
