@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import FiltersClient from "@/app/transactions/FiltersClient";
+import FiltersClient from "./FiltersClient";
 
 export const dynamic = "force-dynamic";
 
