@@ -25,10 +25,12 @@ export async function POST(req: Request) {
     // Sleeper returns season as string
     const season = Number(league.season);
 
-    // If playoff_week_start isn't present, default to 17 (safe NFL regular season default)
-    const totalWeeks = Number(league.settings?.playoff_week_start ?? 17);
+    // ✅ IMPORTANT: transactions often live in week 0 (offseason)
+    // and regular season can go to week 18.
+    // We'll just sync 0..18 consistently across leagues.
+    const MIN_WEEK = 0;
+    const MAX_WEEK = 18;
 
-    // Ensure season exists in DB
     await db.leagueSeason.upsert({
       where: { leagueId_season: { leagueId, season } },
       update: {},
@@ -62,13 +64,15 @@ export async function POST(req: Request) {
       });
     }
 
-    // MATCHUPS + TRANSACTIONS
     let matchupCount = 0;
     let txCount = 0;
     let assetCount = 0;
+    let weeksTouched = 0;
 
-    for (let week = 1; week <= totalWeeks; week++) {
-      // Matchups
+    for (let week = MIN_WEEK; week <= MAX_WEEK; week++) {
+      weeksTouched++;
+
+      // Matchups only really exist in regular season weeks, but harmless if empty
       const matchups = await getMatchups(leagueId, week);
       for (const m of matchups) {
         await db.matchup.upsert({
@@ -89,35 +93,35 @@ export async function POST(req: Request) {
         matchupCount++;
       }
 
-      // Transactions
+      // Transactions (this is what we care about)
       const txs = await getTransactions(leagueId, week);
 
       for (const t of txs) {
         await db.transaction.upsert({
-  where: { id: t.transaction_id },
-  update: {
-    leagueId,
-    season,
-    week,
-    type: t.type,
-    status: t.status,
-    createdAt: new Date(t.created),
-    rawJson: t as any,
-  },
-  create: {
-    id: t.transaction_id,
-    leagueId,
-    season,
-    week,
-    type: t.type,
-    status: t.status,
-    createdAt: new Date(t.created),
-    rawJson: t as any,
-  },
-});
+          where: { id: t.transaction_id },
+          update: {
+            leagueId,
+            season,
+            week,
+            type: t.type,
+            status: t.status,
+            createdAt: new Date(t.created),
+            rawJson: t as any, // required by your schema
+          },
+          create: {
+            id: t.transaction_id,
+            leagueId,
+            season,
+            week,
+            type: t.type,
+            status: t.status,
+            createdAt: new Date(t.created),
+            rawJson: t as any, // required by your schema
+          },
+        });
         txCount++;
 
-        // Clear old assets so resync is deterministic
+        // Make resync deterministic
         await db.transactionAsset.deleteMany({ where: { transactionId: t.transaction_id } });
 
         const adds = t.adds ?? {};
@@ -166,7 +170,7 @@ export async function POST(req: Request) {
           assetCount++;
         }
 
-        // FAAB note (not perfect, but captures budget setting if present)
+        // Optional: capture waiver_budget value if present
         if (t.settings?.waiver_budget !== undefined && t.settings?.waiver_budget !== null) {
           await db.transactionAsset.create({
             data: {
@@ -186,7 +190,7 @@ export async function POST(req: Request) {
       ok: true,
       leagueId,
       season,
-      weeks: totalWeeks,
+      weeksSynced: weeksTouched,
       users: users.length,
       rosters: rosters.length,
       matchups: matchupCount,
