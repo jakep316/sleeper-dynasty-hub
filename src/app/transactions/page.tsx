@@ -37,6 +37,20 @@ function uniq<T>(arr: T[]) {
   return Array.from(new Set(arr));
 }
 
+/**
+ * Normalize labels like "mattyal, herzy07" vs "herzy07, mattyal"
+ * so they become consistent and don't show up as two "different" teams.
+ */
+function normalizeTeamLabel(label: string) {
+  const parts = label
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length <= 1) return label;
+  parts.sort((a, b) => a.localeCompare(b));
+  return parts.join(", ");
+}
+
 export default async function TransactionsPage({ searchParams }: Props) {
   const leagueId = process.env.SLEEPER_LEAGUE_ID!;
 
@@ -105,9 +119,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
         })
       : [];
 
-  const ownerIds = uniq(
-    rosterRows.map((r) => r.ownerId).filter((x): x is string => !!x)
-  );
+  const ownerIds = uniq(rosterRows.map((r) => r.ownerId).filter((x): x is string => !!x));
 
   const owners =
     ownerIds.length > 0
@@ -121,8 +133,8 @@ export default async function TransactionsPage({ searchParams }: Props) {
 
   const rosterLabelMap = new Map<string, string>();
   for (const r of rosterRows) {
-    const label = (r.ownerId && ownerMap.get(r.ownerId)) || `Roster ${r.rosterId}`;
-    rosterLabelMap.set(`${r.leagueId}::${r.season}::${r.rosterId}`, label);
+    const raw = (r.ownerId && ownerMap.get(r.ownerId)) || `Roster ${r.rosterId}`;
+    rosterLabelMap.set(`${r.leagueId}::${r.season}::${r.rosterId}`, normalizeTeamLabel(raw));
   }
 
   const rosterLabel = (lid: string, season: number, rosterId: number | null | undefined) => {
@@ -157,7 +169,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
   };
 
   const pickLabel = (a: any) => {
-    // pickSeason is Int in your schema now
     const ys = typeof a.pickSeason === "number" ? String(a.pickSeason) : "?";
     const rd = typeof a.pickRound === "number" ? String(a.pickRound) : "?";
     return `${ys} R${rd}`;
@@ -191,79 +202,96 @@ export default async function TransactionsPage({ searchParams }: Props) {
   // ---- Column renderers ----
 
   function getTeamsString(t: any) {
-    // For trades: only show unique teams involved in cross-roster moves
     if (t.type === "trade") {
-      const involved: number[] = [];
-      for (const a of t.assets) {
-        const from = a.fromRosterId;
-        const to = a.toRosterId;
-        if (typeof from === "number") involved.push(from);
-        if (typeof to === "number") involved.push(to);
-      }
+      const involvedIds = uniq(
+        t.assets
+          .flatMap((a: any) => [a.fromRosterId, a.toRosterId])
+          .filter((x: any) => typeof x === "number")
+      ) as number[];
 
-      const uniqueTeams = uniq(involved).map((rid) => rosterLabel(t.leagueId, t.season, rid));
+      const labels = involvedIds
+        .map((rid) => rosterLabel(t.leagueId, t.season, rid))
+        .filter((x) => x !== "—")
+        .map(normalizeTeamLabel);
 
-      // Remove "—" if it appears (it shouldn't for trades but just in case)
-      const clean = uniqueTeams.filter((x) => x !== "—");
+      const clean = uniq(labels);
 
-      // If it’s exactly 2 teams: A ↔ B
       if (clean.length === 2) return `${clean[0]} ↔ ${clean[1]}`;
-
-      // Multi-team trades happen sometimes; keep it readable
       if (clean.length > 2) return clean.join(" ↔ ");
-
       return clean[0] ?? "—";
     }
 
-    // Non-trade: show the team that did the move (from or to)
-    const fromTeams = new Set<number>();
-    const toTeams = new Set<number>();
+    // Non-trade: show the team(s) involved
+    const ids = uniq(
+      t.assets
+        .flatMap((a: any) => [a.fromRosterId, a.toRosterId])
+        .filter((x: any) => typeof x === "number")
+    ) as number[];
 
-    for (const a of t.assets) {
-      if (typeof a.fromRosterId === "number") fromTeams.add(a.fromRosterId);
-      if (typeof a.toRosterId === "number") toTeams.add(a.toRosterId);
-    }
+    const labels = uniq(
+      ids.map((rid) => normalizeTeamLabel(rosterLabel(t.leagueId, t.season, rid)))
+    ).filter((x) => x !== "—");
 
-    const labels = uniq([
-      ...Array.from(fromTeams).map((rid) => rosterLabel(t.leagueId, t.season, rid)),
-      ...Array.from(toTeams).map((rid) => rosterLabel(t.leagueId, t.season, rid)),
-    ]).filter((x) => x !== "—");
-
-    // Usually 1 team for waivers/FA; if somehow multiple, show them
     return labels.length ? labels.join(", ") : "—";
   }
 
   function getMoves(t: any) {
-    // TRADES: show what each team RECEIVED (players + picks + FAAB)
+    // TRADES: show Sent + Received per team (players + picks + FAAB)
     if (t.type === "trade") {
-      // Map rosterId -> received[] (anything with toRosterId = rosterId)
       const received = new Map<number, string[]>();
+      const sent = new Map<number, string[]>();
 
       for (const a of t.assets) {
         const from = a.fromRosterId;
         const to = a.toRosterId;
 
-        // Only care about actual movement between rosters
         if (typeof from === "number" && typeof to === "number" && from !== to) {
-          const list = received.get(to) ?? [];
-          list.push(assetLabel(a));
-          received.set(to, list);
+          const label = assetLabel(a);
+
+          const sList = sent.get(from) ?? [];
+          sList.push(label);
+          sent.set(from, sList);
+
+          const rList = received.get(to) ?? [];
+          rList.push(label);
+          received.set(to, rList);
         }
       }
 
-      const teamIds = Array.from(received.keys()).sort((a, b) => a - b);
+      const teamIds = uniq([...sent.keys(), ...received.keys()]).sort((a, b) => a - b);
 
       if (teamIds.length === 0) return <span className="text-zinc-400">—</span>;
 
       return (
-        <div className="space-y-2">
+        <div className="space-y-3">
           {teamIds.map((rid) => {
-            const team = rosterLabel(t.leagueId, t.season, rid);
-            const items = received.get(rid) ?? [];
+            const team = normalizeTeamLabel(rosterLabel(t.leagueId, t.season, rid));
+            const got = received.get(rid) ?? [];
+            const gave = sent.get(rid) ?? [];
+
             return (
-              <div key={rid} className="leading-snug">
-                <div className="font-semibold text-zinc-900">{team} received</div>
-                <div className="text-zinc-700">{items.join(", ")}</div>
+              <div key={rid} className="rounded-2xl border border-zinc-200 bg-white/50 p-3">
+                <div className="font-semibold text-zinc-900">{team}</div>
+
+                <div className="mt-2 grid gap-2 md:grid-cols-2">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                      Received
+                    </div>
+                    <div className="text-zinc-800">
+                      {got.length ? got.join(", ") : <span className="text-zinc-400">—</span>}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                      Sent
+                    </div>
+                    <div className="text-zinc-800">
+                      {gave.length ? gave.join(", ") : <span className="text-zinc-400">—</span>}
+                    </div>
+                  </div>
+                </div>
               </div>
             );
           })}
@@ -271,14 +299,12 @@ export default async function TransactionsPage({ searchParams }: Props) {
       );
     }
 
-    // NON-TRADES: show Added/Dropped (no arrows)
+    // NON-TRADES: show Added/Dropped (players only)
     const adds: string[] = [];
     const drops: string[] = [];
 
     for (const a of t.assets) {
-      // We only show player adds/drops in this UX (you can add FAAB here later if you want)
       if (!a.playerId) continue;
-
       const label = playerLabel(a.playerId);
 
       if (a.fromRosterId && !a.toRosterId) drops.push(label);
