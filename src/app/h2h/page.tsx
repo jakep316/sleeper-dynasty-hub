@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { getRosterNameMap } from "@/lib/names";
 
 type Key = string;
 
@@ -19,11 +20,16 @@ export default async function H2HPage() {
   }
 
   const season = seasonRow.season;
+
+  const rosterNames = await getRosterNameMap(leagueId, season);
+  const nameOf = (rosterId: number) => rosterNames.get(rosterId) ?? `Roster ${rosterId}`;
+
   const matchups = await db.matchup.findMany({
     where: { leagueId, season, matchupId: { not: null } },
     orderBy: [{ week: "asc" }, { matchupId: "asc" }],
   });
 
+  // group by (week, matchupId) -> two rows (one per roster)
   const groups = new Map<string, typeof matchups>();
   for (const m of matchups) {
     const k = `${m.week}-${m.matchupId}`;
@@ -34,11 +40,21 @@ export default async function H2HPage() {
 
   const h2h = new Map<
     Key,
-    { a: number; b: number; aw: number; bw: number; ties: number; games: number; apf: number; bpf: number }
+    {
+      a: number;
+      b: number;
+      aw: number;
+      bw: number;
+      ties: number;
+      games: number;
+      apf: number;
+      bpf: number;
+    }
   >();
 
   for (const [, g] of groups) {
     if (g.length !== 2) continue;
+
     const [m1, m2] = g;
     const a = Math.min(m1.rosterId, m2.rosterId);
     const b = Math.max(m1.rosterId, m2.rosterId);
@@ -70,11 +86,33 @@ export default async function H2HPage() {
       <h1>Head-to-Head</h1>
       <p>Season {season}</p>
 
-      {rows.map((r) => (
-        <div key={`${r.a}-${r.b}`}>
-          {r.a} vs {r.b} — {r.aw}-{r.bw}-{r.ties}
-        </div>
-      ))}
+      <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 12 }}>
+        <thead>
+          <tr>
+            {["Pair", "Games", "Left W", "Right W", "Ties", "Left PF", "Right PF"].map((h) => (
+              <th key={h} style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 8 }}>
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+
+        <tbody>
+          {rows.map((r) => (
+            <tr key={`${r.a}-${r.b}`}>
+              <td style={{ padding: 8, borderBottom: "1px solid #f0f0f0" }}>
+                {nameOf(r.a)} vs {nameOf(r.b)}
+              </td>
+              <td style={{ padding: 8, borderBottom: "1px solid #f0f0f0" }}>{r.games}</td>
+              <td style={{ padding: 8, borderBottom: "1px solid #f0f0f0" }}>{r.aw}</td>
+              <td style={{ padding: 8, borderBottom: "1px solid #f0f0f0" }}>{r.bw}</td>
+              <td style={{ padding: 8, borderBottom: "1px solid #f0f0f0" }}>{r.ties}</td>
+              <td style={{ padding: 8, borderBottom: "1px solid #f0f0f0" }}>{r.apf.toFixed(2)}</td>
+              <td style={{ padding: 8, borderBottom: "1px solid #f0f0f0" }}>{r.bpf.toFixed(2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
