@@ -2,173 +2,272 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import {
   getLeague,
-  getLeagueRosters,
   getLeagueUsers,
-  getMatchups,
-  getTransactions,
+  getLeagueRosters,
+  getMatchupsForWeek,
+  getTransactionsForWeek,
 } from "@/lib/sleeper";
 
-export async function POST() {
+/*
+  This route syncs ONE league id.
+
+  Supports:
+  POST /api/sync
+  POST /api/sync?leagueId=123
+
+  The sync-history route will call this multiple times for each previous league id.
+*/
+
+export async function POST(req: Request) {
   try {
-    const leagueId = process.env.SLEEPER_LEAGUE_ID!;
+    const url = new URL(req.url);
+
+    // Allow override via query param
+    const leagueId =
+      url.searchParams.get("leagueId") ?? process.env.SLEEPER_LEAGUE_ID!;
+
+    if (!leagueId) {
+      return NextResponse.json(
+        { ok: false, error: "Missing leagueId" },
+        { status: 400 }
+      );
+    }
+
+    console.log("Syncing league:", leagueId);
+
+    /*
+      -----------------------------------
+      League metadata
+      -----------------------------------
+    */
+
     const league = await getLeague(leagueId);
 
-    const season = Number(league.season ?? new Date().getFullYear());
-    const previousLeagueId = league.previous_league_id ?? null;
+    const season = Number(league.season);
+    const totalWeeks = Number(league.settings?.playoff_week_start ?? 17);
 
     await db.leagueSeason.upsert({
-      where: { leagueId_season: { leagueId, season } },
-      update: { previousLeagueId },
-      create: { leagueId, season, previousLeagueId },
+      where: {
+        leagueId_season: {
+          leagueId,
+          season,
+        },
+      },
+      update: {},
+      create: {
+        leagueId,
+        season,
+      },
     });
 
+    /*
+      -----------------------------------
+      Users
+      -----------------------------------
+    */
+
     const users = await getLeagueUsers(leagueId);
+
     for (const u of users) {
       await db.sleeperUser.upsert({
         where: { sleeperUserId: u.user_id },
         update: {
-          username: u.username ?? null,
           displayName: u.display_name ?? null,
-          avatar: u.avatar ?? null,
+          username: u.username ?? null,
         },
         create: {
           sleeperUserId: u.user_id,
-          username: u.username ?? null,
           displayName: u.display_name ?? null,
-          avatar: u.avatar ?? null,
+          username: u.username ?? null,
         },
       });
     }
 
+    /*
+      -----------------------------------
+      Rosters
+      -----------------------------------
+    */
+
     const rosters = await getLeagueRosters(leagueId);
+
     for (const r of rosters) {
       await db.roster.upsert({
-        where: { leagueId_season_rosterId: { leagueId, season, rosterId: r.roster_id } },
+        where: {
+          leagueId_season_rosterId: {
+            leagueId,
+            season,
+            rosterId: r.roster_id,
+          },
+        },
         update: {
           ownerId: r.owner_id ?? null,
-          settingsJson: r.settings ?? null,
         },
         create: {
           leagueId,
           season,
           rosterId: r.roster_id,
           ownerId: r.owner_id ?? null,
-          settingsJson: r.settings ?? null,
         },
       });
     }
 
-    const MAX = 18;
-    for (let week = 1; week <= MAX; week++) {
-      const ms = await getMatchups(leagueId, week);
-      if (Array.isArray(ms) && ms.length) {
-        for (const m of ms) {
-          await db.matchup.upsert({
-            where: {
-              leagueId_season_week_rosterId: { leagueId, season, week, rosterId: m.roster_id },
-            },
-            update: {
-              matchupId: m.matchup_id ?? null,
-              points: typeof m.points === "number" ? m.points : null,
-            },
-            create: {
+    /*
+      -----------------------------------
+      Matchups + Transactions (per week)
+      -----------------------------------
+    */
+
+    let matchupCount = 0;
+    let txCount = 0;
+    let assetCount = 0;
+
+    for (let week = 1; week <= totalWeeks; week++) {
+      /*
+        ---------- Matchups ----------
+      */
+      const matchups = await getMatchupsForWeek(leagueId, week);
+
+      for (const m of matchups) {
+        await db.matchup.upsert({
+          where: {
+            leagueId_season_week_rosterId: {
               leagueId,
               season,
               week,
               rosterId: m.roster_id,
-              matchupId: m.matchup_id ?? null,
-              points: typeof m.points === "number" ? m.points : null,
             },
-          });
-        }
+          },
+          update: {
+            matchupId: m.matchup_id ?? null,
+            points: m.points ?? 0,
+          },
+          create: {
+            leagueId,
+            season,
+            week,
+            rosterId: m.roster_id,
+            matchupId: m.matchup_id ?? null,
+            points: m.points ?? 0,
+          },
+        });
+
+        matchupCount++;
       }
 
-      const txs = await getTransactions(leagueId, week);
-      if (Array.isArray(txs) && txs.length) {
-        for (const t of txs) {
-          await db.transaction.upsert({
-            where: { id: String(t.transaction_id) },
-            update: {
-              type: String(t.type),
-              status: String(t.status),
-              createdAtMs: BigInt(t.created ?? 0),
-              updatedAtMs: BigInt(t.status_updated ?? 0),
-              rawJson: t,
-            },
-            create: {
-              id: String(t.transaction_id),
-              leagueId,
-              season,
-              week,
-              type: String(t.type),
-              status: String(t.status),
-              createdAtMs: BigInt(t.created ?? 0),
-              updatedAtMs: BigInt(t.status_updated ?? 0),
-              rawJson: t,
+      /*
+        ---------- Transactions ----------
+      */
+      const txs = await getTransactionsForWeek(leagueId, week);
+
+      for (const t of txs) {
+        await db.transaction.upsert({
+          where: { id: t.transaction_id },
+          update: {
+            leagueId,
+            season,
+            week,
+            type: t.type,
+            status: t.status,
+            createdAt: new Date(t.created),
+          },
+          create: {
+            id: t.transaction_id,
+            leagueId,
+            season,
+            week,
+            type: t.type,
+            status: t.status,
+            createdAt: new Date(t.created),
+          },
+        });
+
+        txCount++;
+
+        /*
+          ----- Assets -----
+        */
+
+        // clear old assets first (safe for re-sync)
+        await db.transactionAsset.deleteMany({
+          where: { transactionId: t.transaction_id },
+        });
+
+        const adds = t.adds ?? {};
+        const drops = t.drops ?? {};
+
+        // players added
+        for (const [playerId, rosterId] of Object.entries(adds)) {
+          await db.transactionAsset.create({
+            data: {
+              transactionId: t.transaction_id,
+              kind: "player",
+              playerId,
+              fromRosterId: null,
+              toRosterId: Number(rosterId),
             },
           });
+          assetCount++;
+        }
 
-          await db.transactionAsset.deleteMany({
-            where: { transactionId: String(t.transaction_id) },
+        // players dropped
+        for (const [playerId, rosterId] of Object.entries(drops)) {
+          await db.transactionAsset.create({
+            data: {
+              transactionId: t.transaction_id,
+              kind: "player_drop",
+              playerId,
+              fromRosterId: Number(rosterId),
+              toRosterId: null,
+            },
           });
+          assetCount++;
+        }
 
-          const adds = t.adds ?? {};
-          const drops = t.drops ?? {};
+        // picks
+        for (const p of t.draft_picks ?? []) {
+          await db.transactionAsset.create({
+            data: {
+              transactionId: t.transaction_id,
+              kind: "pick",
+              fromRosterId: p.previous_owner_id ?? null,
+              toRosterId: p.owner_id ?? null,
+              pickSeason: p.season,
+              pickRound: p.round,
+            },
+          });
+          assetCount++;
+        }
 
-          for (const [playerId, toRosterId] of Object.entries(adds)) {
-            await db.transactionAsset.create({
-              data: {
-                transactionId: String(t.transaction_id),
-                kind: "player",
-                fromRosterId: null,
-                toRosterId: Number(toRosterId),
-                playerId: String(playerId),
-              },
-            });
-          }
-
-          for (const [playerId, fromRosterId] of Object.entries(drops)) {
-            await db.transactionAsset.create({
-              data: {
-                transactionId: String(t.transaction_id),
-                kind: "player_drop",
-                fromRosterId: Number(fromRosterId),
-                toRosterId: null,
-                playerId: String(playerId),
-              },
-            });
-          }
-
-          for (const p of t.draft_picks ?? []) {
-            await db.transactionAsset.create({
-              data: {
-                transactionId: String(t.transaction_id),
-                kind: "pick",
-                fromRosterId: p.previous_owner_id ?? null,
-                toRosterId: p.owner_id ?? null,
-                pickSeason: Number(p.season ?? 0) || null,
-                pickRound: Number(p.round ?? 0) || null,
-              },
-            });
-          }
-
-          for (const b of t.waiver_budget ?? []) {
-            await db.transactionAsset.create({
-              data: {
-                transactionId: String(t.transaction_id),
-                kind: "faab",
-                fromRosterId: b.sender ?? null,
-                toRosterId: b.receiver ?? null,
-                faabAmount: Number(b.amount ?? 0) || 0,
-              },
-            });
-          }
+        // FAAB
+        if (t.settings?.waiver_budget) {
+          await db.transactionAsset.create({
+            data: {
+              transactionId: t.transaction_id,
+              kind: "faab",
+              faabAmount: t.settings.waiver_budget,
+              fromRosterId: null,
+              toRosterId: null,
+            },
+          });
+          assetCount++;
         }
       }
     }
 
-    return NextResponse.json({ ok: true, leagueId, season });
+    return NextResponse.json({
+      ok: true,
+      leagueId,
+      season,
+      matchups: matchupCount,
+      transactions: txCount,
+      assets: assetCount,
+    });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message ?? "Unknown error" }, { status: 500 });
+    console.error(e);
+    return NextResponse.json(
+      { ok: false, error: e?.message ?? "Unknown error" },
+      { status: 500 }
+    );
   }
 }
