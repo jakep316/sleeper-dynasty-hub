@@ -25,17 +25,22 @@ function buildQueryString(params: Record<string, string | number | null | undefi
   return s ? `?${s}` : "";
 }
 
-async function getLeagueIdChain(startLeagueId: string, maxDepth = 15) {
-  const chain: string[] = [];
+async function getLeagueIdChain(startLeagueId: string, maxDepth = 25) {
+  const chain: Array<{ leagueId: string; season: number; previous: string | null }> = [];
   const seen = new Set<string>();
   let current: string | null = startLeagueId;
 
   for (let i = 0; i < maxDepth && current; i++) {
     if (seen.has(current)) break;
     seen.add(current);
-    chain.push(current);
 
     const meta = await getLeague(current);
+    chain.push({
+      leagueId: meta.league_id,
+      season: Number(meta.season),
+      previous: meta.previous_league_id ?? null,
+    });
+
     current = meta.previous_league_id ?? null;
   }
 
@@ -43,44 +48,44 @@ async function getLeagueIdChain(startLeagueId: string, maxDepth = 15) {
 }
 
 export default async function TransactionsPage({ searchParams }: Props) {
-  const startLeagueId = process.env.SLEEPER_LEAGUE_ID!;
+  const rootLeagueId = process.env.SLEEPER_LEAGUE_ID!;
 
   const seasonParam = searchParams?.season ?? "all";
   const teamParam = searchParams?.team ?? "all";
   const typeParam = searchParams?.type ?? "all";
   const page = Math.max(1, Number(searchParams?.page ?? 1));
 
-  // Build league chain (newest -> oldest)
-  const leagueChain = await getLeagueIdChain(startLeagueId);
+  // Build chain with season mapping
+  const chain = await getLeagueIdChain(rootLeagueId);
+  const leagueIds = chain.map((c) => c.leagueId);
 
-  // Base where clause across all leagues in chain
-  const where: any = {
-    leagueId: { in: leagueChain },
-  };
+  // Determine which leagueId to use for roster label lookups
+  // If user selects a season, use the leagueId that matches that season.
+  const labelLeagueId =
+    seasonParam !== "all"
+      ? chain.find((c) => c.season === Number(seasonParam))?.leagueId ?? rootLeagueId
+      : rootLeagueId;
 
+  // Filters for DB query (across ALL leagueIds)
+  const where: any = { leagueId: { in: leagueIds } };
   if (seasonParam !== "all") where.season = Number(seasonParam);
   if (typeParam !== "all") where.type = typeParam;
 
-  // Team filter: any asset that moved from/to this roster id
   if (teamParam !== "all") {
     const teamId = Number(teamParam);
-    where.assets = {
-      some: {
-        OR: [{ fromRosterId: teamId }, { toRosterId: teamId }],
-      },
-    };
+    where.assets = { some: { OR: [{ fromRosterId: teamId }, { toRosterId: teamId }] } };
   }
 
-  // Dropdown data
+  // Dropdown seasons + types from DB (across the chain)
   const [seasonRows, typeRows] = await Promise.all([
     db.transaction.findMany({
-      where: { leagueId: { in: leagueChain } },
+      where: { leagueId: { in: leagueIds } },
       distinct: ["season"],
       select: { season: true },
       orderBy: { season: "desc" },
     }),
     db.transaction.findMany({
-      where: { leagueId: { in: leagueChain } },
+      where: { leagueId: { in: leagueIds } },
       distinct: ["type"],
       select: { type: true },
     }),
@@ -89,7 +94,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
   const seasons = seasonRows.map((s) => s.season);
   const types = (typeRows.map((t) => t.type).filter(Boolean) as string[]).sort();
 
-  // Count + page transactions
+  // Query transactions
   const [totalCount, transactions] = await Promise.all([
     db.transaction.count({ where }),
     db.transaction.findMany({
@@ -103,7 +108,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
-  // Player name lookup for any playerIds on this page
+  // Player map for playerIds shown on this page
   const playerIds = Array.from(
     new Set(
       transactions
@@ -140,15 +145,12 @@ export default async function TransactionsPage({ searchParams }: Props) {
     return a.kind ?? "asset";
   };
 
-  // Build roster dropdown labels (owner/display names) from the most relevant season
+  // Roster dropdown labels (use the leagueId for the selected season)
   const seasonForRosterLabels =
-    seasonParam !== "all"
-      ? Number(seasonParam)
-      : (seasons[0] ?? new Date().getFullYear());
+    seasonParam !== "all" ? Number(seasonParam) : seasons[0] ?? new Date().getFullYear();
 
-  // Use the newest league in the chain for roster label source (most likely what you want in UI)
   const rosterRows = await db.roster.findMany({
-    where: { leagueId: startLeagueId, season: seasonForRosterLabels },
+    where: { leagueId: labelLeagueId, season: seasonForRosterLabels },
     select: { rosterId: true, ownerId: true },
     orderBy: { rosterId: "asc" },
   });
@@ -177,24 +179,16 @@ export default async function TransactionsPage({ searchParams }: Props) {
               : `Roster ${r.rosterId}`;
           return { id: r.rosterId, label };
         })
-      : Array.from({ length: 20 }, (_, i) => ({
-          id: i + 1,
-          label: `Roster ${i + 1}`,
-        }));
+      : Array.from({ length: 20 }, (_, i) => ({ id: i + 1, label: `Roster ${i + 1}` }));
 
-  // Pagination links preserve filters
-  const common = {
-    season: seasonParam,
-    team: teamParam,
-    type: typeParam,
-  };
+  const common = { season: seasonParam, team: teamParam, type: typeParam };
 
   return (
     <main className="mx-auto max-w-6xl p-6 space-y-6">
       <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
         <h1 className="text-2xl font-bold">Transactions</h1>
         <p className="mt-1 text-sm text-zinc-600">
-          Showing all years (league chain length: {leagueChain.length})
+          League chain: {chain.map((c) => `${c.season}`).join(" → ")} (count: {chain.length})
         </p>
       </div>
 
@@ -283,10 +277,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
               <tr>
                 <td className="p-6 text-zinc-600" colSpan={5}>
                   No transactions found with the current filters.
-                  <div className="mt-2 text-xs text-zinc-500">
-                    If this is unexpected, run: <code>POST /api/sync-history</code> and confirm it
-                    returns multiple leagues and non-zero transaction counts.
-                  </div>
                 </td>
               </tr>
             )}

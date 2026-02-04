@@ -33,7 +33,7 @@ export default function FiltersClient({
     season: seasonParam,
     team: teamParam,
     type: typeParam,
-    page: 1, // reset pagination on change
+    page: 1,
   };
 
   return (
