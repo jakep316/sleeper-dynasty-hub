@@ -18,12 +18,14 @@ export default function FiltersClient({
   typeParam,
   seasons,
   types,
+  rosters,
 }: {
   seasonParam: string;
   teamParam: string;
   typeParam: string;
   seasons: number[];
   types: string[];
+  rosters: Array<{ id: number; label: string }>;
 }) {
   const router = useRouter();
 
@@ -31,10 +33,8 @@ export default function FiltersClient({
     season: seasonParam,
     team: teamParam,
     type: typeParam,
-    page: 1, // reset page on change
+    page: 1, // reset pagination on change
   };
-
-  const rosterOptions = Array.from({ length: 20 }, (_, i) => i + 1);
 
   return (
     <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
@@ -76,7 +76,7 @@ export default function FiltersClient({
         </div>
 
         <div className="grid gap-1">
-          <label className="text-xs font-semibold text-zinc-600">Team (Roster)</label>
+          <label className="text-xs font-semibold text-zinc-600">Team</label>
           <select
             className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm"
             value={teamParam}
@@ -85,9 +85,9 @@ export default function FiltersClient({
             }
           >
             <option value="all">All</option>
-            {rosterOptions.map((r) => (
-              <option key={r} value={String(r)}>
-                Roster {r}
+            {rosters.map((r) => (
+              <option key={r.id} value={String(r.id)}>
+                {r.label}
               </option>
             ))}
           </select>
