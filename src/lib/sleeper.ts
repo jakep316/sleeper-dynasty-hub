@@ -21,3 +21,7 @@ export async function getMatchups(leagueId: string, week: number) {
 export async function getTransactions(leagueId: string, round: number) {
   return getJson<any[]>(`/league/${leagueId}/transactions/${round}`);
 }
+
+export async function getAllNflPlayers() {
+  return getJson<Record<string, any>>(`/players/nfl`);
+}

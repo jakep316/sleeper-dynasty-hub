@@ -175,3 +175,18 @@ model VerificationToken {
 
   @@unique([identifier, token])
 }
+
+model SleeperPlayer {
+  id        String   @id // Sleeper player_id as string
+  fullName  String?
+  position  String?
+  team      String?
+  status    String?
+  updatedAt DateTime @updatedAt
+}
+
+model AppMeta {
+  key       String   @id
+  value     String?
+  updatedAt DateTime @updatedAt
+}
