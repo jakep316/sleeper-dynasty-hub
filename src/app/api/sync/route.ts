@@ -1,73 +1,42 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import {
-  getLeague,
-  getLeagueUsers,
-  getLeagueRosters,
-  getMatchupsForWeek,
-  getTransactionsForWeek,
-} from "@/lib/sleeper";
+import { getLeague, getUsers, getRosters, getMatchups, getTransactions } from "@/lib/sleeper";
 
 /*
-  This route syncs ONE league id.
+  Syncs ONE Sleeper league id.
 
-  Supports:
   POST /api/sync
   POST /api/sync?leagueId=123
 
-  The sync-history route will call this multiple times for each previous league id.
+  Used by /api/sync-history to sync the previous_league_id chain.
 */
 
 export async function POST(req: Request) {
   try {
     const url = new URL(req.url);
 
-    // Allow override via query param
-    const leagueId =
-      url.searchParams.get("leagueId") ?? process.env.SLEEPER_LEAGUE_ID!;
-
+    const leagueId = url.searchParams.get("leagueId") ?? process.env.SLEEPER_LEAGUE_ID!;
     if (!leagueId) {
-      return NextResponse.json(
-        { ok: false, error: "Missing leagueId" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "Missing leagueId" }, { status: 400 });
     }
-
-    console.log("Syncing league:", leagueId);
-
-    /*
-      -----------------------------------
-      League metadata
-      -----------------------------------
-    */
 
     const league = await getLeague(leagueId);
 
+    // Sleeper returns season as string
     const season = Number(league.season);
+
+    // If playoff_week_start isn't present, default to 17 (safe NFL regular season default)
     const totalWeeks = Number(league.settings?.playoff_week_start ?? 17);
 
+    // Ensure season exists in DB
     await db.leagueSeason.upsert({
-      where: {
-        leagueId_season: {
-          leagueId,
-          season,
-        },
-      },
+      where: { leagueId_season: { leagueId, season } },
       update: {},
-      create: {
-        leagueId,
-        season,
-      },
+      create: { leagueId, season },
     });
 
-    /*
-      -----------------------------------
-      Users
-      -----------------------------------
-    */
-
-    const users = await getLeagueUsers(leagueId);
-
+    // USERS
+    const users = await getUsers(leagueId);
     for (const u of users) {
       await db.sleeperUser.upsert({
         where: { sleeperUserId: u.user_id },
@@ -83,61 +52,27 @@ export async function POST(req: Request) {
       });
     }
 
-    /*
-      -----------------------------------
-      Rosters
-      -----------------------------------
-    */
-
-    const rosters = await getLeagueRosters(leagueId);
-
+    // ROSTERS
+    const rosters = await getRosters(leagueId);
     for (const r of rosters) {
       await db.roster.upsert({
-        where: {
-          leagueId_season_rosterId: {
-            leagueId,
-            season,
-            rosterId: r.roster_id,
-          },
-        },
-        update: {
-          ownerId: r.owner_id ?? null,
-        },
-        create: {
-          leagueId,
-          season,
-          rosterId: r.roster_id,
-          ownerId: r.owner_id ?? null,
-        },
+        where: { leagueId_season_rosterId: { leagueId, season, rosterId: r.roster_id } },
+        update: { ownerId: r.owner_id ?? null },
+        create: { leagueId, season, rosterId: r.roster_id, ownerId: r.owner_id ?? null },
       });
     }
 
-    /*
-      -----------------------------------
-      Matchups + Transactions (per week)
-      -----------------------------------
-    */
-
+    // MATCHUPS + TRANSACTIONS
     let matchupCount = 0;
     let txCount = 0;
     let assetCount = 0;
 
     for (let week = 1; week <= totalWeeks; week++) {
-      /*
-        ---------- Matchups ----------
-      */
-      const matchups = await getMatchupsForWeek(leagueId, week);
-
+      // Matchups
+      const matchups = await getMatchups(leagueId, week);
       for (const m of matchups) {
         await db.matchup.upsert({
-          where: {
-            leagueId_season_week_rosterId: {
-              leagueId,
-              season,
-              week,
-              rosterId: m.roster_id,
-            },
-          },
+          where: { leagueId_season_week_rosterId: { leagueId, season, week, rosterId: m.roster_id } },
           update: {
             matchupId: m.matchup_id ?? null,
             points: m.points ?? 0,
@@ -151,14 +86,11 @@ export async function POST(req: Request) {
             points: m.points ?? 0,
           },
         });
-
         matchupCount++;
       }
 
-      /*
-        ---------- Transactions ----------
-      */
-      const txs = await getTransactionsForWeek(leagueId, week);
+      // Transactions
+      const txs = await getTransactions(leagueId, week);
 
       for (const t of txs) {
         await db.transaction.upsert({
@@ -181,17 +113,10 @@ export async function POST(req: Request) {
             createdAt: new Date(t.created),
           },
         });
-
         txCount++;
 
-        /*
-          ----- Assets -----
-        */
-
-        // clear old assets first (safe for re-sync)
-        await db.transactionAsset.deleteMany({
-          where: { transactionId: t.transaction_id },
-        });
+        // Clear old assets so resync is deterministic
+        await db.transactionAsset.deleteMany({ where: { transactionId: t.transaction_id } });
 
         const adds = t.adds ?? {};
         const drops = t.drops ?? {};
@@ -224,7 +149,7 @@ export async function POST(req: Request) {
           assetCount++;
         }
 
-        // picks
+        // picks moved
         for (const p of t.draft_picks ?? []) {
           await db.transactionAsset.create({
             data: {
@@ -239,8 +164,8 @@ export async function POST(req: Request) {
           assetCount++;
         }
 
-        // FAAB
-        if (t.settings?.waiver_budget) {
+        // FAAB note (not perfect, but captures budget setting if present)
+        if (t.settings?.waiver_budget !== undefined && t.settings?.waiver_budget !== null) {
           await db.transactionAsset.create({
             data: {
               transactionId: t.transaction_id,
@@ -259,15 +184,15 @@ export async function POST(req: Request) {
       ok: true,
       leagueId,
       season,
+      weeks: totalWeeks,
+      users: users.length,
+      rosters: rosters.length,
       matchups: matchupCount,
       transactions: txCount,
       assets: assetCount,
     });
   } catch (e: any) {
     console.error(e);
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? "Unknown error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: e?.message ?? "Unknown error" }, { status: 500 });
   }
 }
