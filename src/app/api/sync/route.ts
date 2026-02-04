@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
  * Syncs ONE league:
  * - users, rosters
  * - matchups weeks 1..18
- * - transactions weeks 0..18 (IMPORTANT: offseason is week 0)
+ * - transactions weeks 0..18
  */
 export async function POST(req: Request) {
   try {
@@ -22,14 +22,13 @@ export async function POST(req: Request) {
     const league = await getLeague(leagueId);
     const season = Number(league.season);
 
-    // Ensure we track this league-season
     await db.leagueSeason.upsert({
       where: { leagueId_season: { leagueId, season } },
       update: {},
       create: { leagueId, season },
     });
 
-    // ---- USERS ----
+    // USERS (for THIS leagueId)
     const users = await getUsers(leagueId);
     await Promise.all(
       users.map((u) =>
@@ -48,7 +47,7 @@ export async function POST(req: Request) {
       )
     );
 
-    // ---- ROSTERS ----
+    // ROSTERS (for THIS leagueId + season)
     const rosters = await getRosters(leagueId);
     await Promise.all(
       rosters.map((r) =>
@@ -60,7 +59,7 @@ export async function POST(req: Request) {
       )
     );
 
-    // ---- MATCHUPS (weeks 1..18) ----
+    // MATCHUPS (weeks 1..18)
     let matchupCount = 0;
     for (let week = 1; week <= 18; week++) {
       const matchups = await getMatchups(leagueId, week);
@@ -70,10 +69,7 @@ export async function POST(req: Request) {
         matchups.map((m) =>
           db.matchup.upsert({
             where: { leagueId_season_week_rosterId: { leagueId, season, week, rosterId: m.roster_id } },
-            update: {
-              matchupId: m.matchup_id ?? null,
-              points: m.points ?? 0,
-            },
+            update: { matchupId: m.matchup_id ?? null, points: m.points ?? 0 },
             create: {
               leagueId,
               season,
@@ -87,7 +83,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // ---- TRANSACTIONS (weeks 0..18) ----
+    // TRANSACTIONS (weeks 0..18)
     let txFetched = 0;
     let txUpserted = 0;
     let assetsCreated = 0;
@@ -97,7 +93,6 @@ export async function POST(req: Request) {
       txFetched += txs.length;
 
       for (const t of txs) {
-        // Upsert the transaction row (rawJson REQUIRED by your schema)
         await db.transaction.upsert({
           where: { id: t.transaction_id },
           update: {
@@ -122,13 +117,12 @@ export async function POST(req: Request) {
         });
         txUpserted++;
 
-        // Rebuild assets each sync (safe and deterministic)
+        // rebuild assets deterministically
         await db.transactionAsset.deleteMany({ where: { transactionId: t.transaction_id } });
 
         const adds = t.adds ?? {};
         const drops = t.drops ?? {};
 
-        // Adds
         for (const [playerId, rosterId] of Object.entries(adds)) {
           await db.transactionAsset.create({
             data: {
@@ -142,7 +136,6 @@ export async function POST(req: Request) {
           assetsCreated++;
         }
 
-        // Drops
         for (const [playerId, rosterId] of Object.entries(drops)) {
           await db.transactionAsset.create({
             data: {
@@ -156,22 +149,23 @@ export async function POST(req: Request) {
           assetsCreated++;
         }
 
-        // Draft picks
         for (const p of t.draft_picks ?? []) {
+          const pickSeason =
+            p.season === null || p.season === undefined ? null : Number(p.season);
+
           await db.transactionAsset.create({
             data: {
               transactionId: t.transaction_id,
               kind: "pick",
               fromRosterId: p.previous_owner_id ?? null,
               toRosterId: p.owner_id ?? null,
-              pickSeason: p.season,
-              pickRound: p.round,
+              pickSeason, // ✅ coerced to Int|null
+              pickRound: p.round ?? null,
             },
           });
           assetsCreated++;
         }
 
-        // Optional FAAB
         const faab = t.settings?.waiver_budget;
         if (typeof faab === "number") {
           await db.transactionAsset.create({
