@@ -1,3 +1,4 @@
+// src/app/transactions/page.tsx
 import TransactionsClient from "./TransactionsClient";
 
 export const dynamic = "force-dynamic";
