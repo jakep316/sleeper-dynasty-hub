@@ -362,33 +362,42 @@ export async function GET(req: Request) {
 
     const draftedPlayerNameMap = new Map(draftedPlayers.map((p) => [p.id, p.fullName ?? p.id]));
 
-    // Drafted player label for inside the pick parentheses: JUST the name (no pos/team)
+    // Drafted player label inside pick parentheses: JUST the name (no pos/team)
     const draftedPlayerNameOnly = (id: string) => draftedPlayerNameMap.get(id) ?? id;
 
     function pickLabel(t: any, a: any) {
       const ys = typeof a.pickSeason === "number" ? a.pickSeason : null;
       const rd = typeof a.pickRound === "number" ? a.pickRound : null;
 
-      const seasonForNames = ys ?? t.season;
-      const lidForNames =
-        (ys && seasonToLeagueId.get(ys)) || seasonToLeagueId.get(t.season) || t.leagueId;
+      const core = `${ys ?? "?"} R${rd ?? "?"}`;
+      if (ys === null || rd === null) return core;
+
+      const seasonForNames = ys;
+      const lidForNames = seasonToLeagueId.get(ys) || seasonToLeagueId.get(t.season) || t.leagueId;
 
       const draftPicks: any[] = Array.isArray(t.rawJson?.draft_picks) ? t.rawJson.draft_picks : [];
 
-      const match = draftPicks.find((p) => {
+      // Candidates for this season+round
+      const candidates = draftPicks.filter((p) => {
         const ps = Number(p?.season);
         const pr = Number(p?.round);
-        if (!Number.isFinite(ps) || !Number.isFinite(pr)) return false;
-        if (ys !== null && ps !== ys) return false;
-        if (rd !== null && pr !== rd) return false;
-
-        const prev = p?.previous_owner_id;
-        const owner = p?.owner_id;
-        if (typeof a.fromRosterId === "number" && typeof a.toRosterId === "number") {
-          if (prev === a.fromRosterId && owner === a.toRosterId) return true;
-        }
-        return true;
+        return Number.isFinite(ps) && Number.isFinite(pr) && ps === ys && pr === rd;
       });
+
+      // If we have from/to rosterIds, try to match the transfer precisely
+      let match: any | null = null;
+      if (typeof a.fromRosterId === "number" && typeof a.toRosterId === "number") {
+        const exact = candidates.filter(
+          (p) => p?.previous_owner_id === a.fromRosterId && p?.owner_id === a.toRosterId
+        );
+        if (exact.length === 1) match = exact[0];
+      }
+
+      // If still no match, only accept a single unambiguous candidate
+      if (!match && candidates.length === 1) match = candidates[0];
+
+      // If ambiguous (multiple candidates), do NOT guess (prevents “same pick twice” labeling)
+      if (!match) return core;
 
       const originalRoster =
         typeof match?.roster_id === "number" ? (match.roster_id as number) : null;
@@ -396,15 +405,14 @@ export async function GET(req: Request) {
       const originalTeam =
         originalRoster !== null ? rosterLabel(lidForNames, seasonForNames, originalRoster) : null;
 
+      if (!originalTeam) return core;
+
       let draftedName: string | null = null;
-      if (ys !== null && rd !== null && originalRoster !== null) {
+      if (originalRoster !== null) {
         const key = `${lidForNames}::${ys}::${originalRoster}::${rd}`;
         const pid = draftedPlayerIdBySlot.get(key);
         if (pid) draftedName = draftedPlayerNameOnly(pid);
       }
-
-      const core = `${ys ?? "?"} R${rd ?? "?"}`;
-      if (!originalTeam) return core;
 
       const extra = draftedName ? ` ${draftedName}` : "";
       return `${core} (${originalTeam} pick${extra})`;
