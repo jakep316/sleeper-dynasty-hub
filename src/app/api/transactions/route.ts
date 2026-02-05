@@ -43,10 +43,6 @@ function parseCsvStrings(v: string | null): string[] {
     .filter(Boolean);
 }
 
-/**
- * Walk the Sleeper previous_league_id chain.
- * Returns [current, previous, ...]
- */
 async function getLeagueChainIds(startLeagueId: string) {
   const ids: string[] = [];
   const seen = new Set<string>();
@@ -65,11 +61,6 @@ async function getLeagueChainIds(startLeagueId: string) {
   return ids;
 }
 
-/**
- * Build rosterLabel lookup:
- * key: `${leagueId}::${season}::${rosterId}` -> label
- * plus season -> leagueId map for correct pick-season labeling.
- */
 async function buildRosterLabelMap(leagueIds: string[]) {
   const seasonToLeagueId = new Map<number, string>();
   const leagueSeasonPairs: Array<{ leagueId: string; season: number }> = [];
@@ -104,10 +95,7 @@ async function buildRosterLabelMap(leagueIds: string[]) {
       : [];
 
   const ownerMap = new Map(
-    owners.map((o) => [
-      o.sleeperUserId,
-      o.displayName ?? o.username ?? o.sleeperUserId,
-    ])
+    owners.map((o) => [o.sleeperUserId, o.displayName ?? o.username ?? o.sleeperUserId])
   );
 
   const rosterLabelMap = new Map<string, string>();
@@ -121,7 +109,23 @@ async function buildRosterLabelMap(leagueIds: string[]) {
     return rosterLabelMap.get(`${leagueId}::${season}::${rosterId}`) ?? `Roster ${rosterId}`;
   }
 
-  return { rosterLabel, seasonToLeagueId };
+  async function rosterOwnerLabelFallback(leagueId: string, season: number, rosterId: number) {
+    const roster = await db.roster.findFirst({
+      where: { leagueId, season, rosterId },
+      select: { ownerId: true },
+    });
+    if (!roster?.ownerId) return null;
+
+    const owner = await db.sleeperUser.findFirst({
+      where: { sleeperUserId: roster.ownerId },
+      select: { displayName: true, username: true, sleeperUserId: true },
+    });
+    return owner?.displayName ?? owner?.username ?? owner?.sleeperUserId ?? null;
+  }
+
+  const maxSeasonInChain = Math.max(...Array.from(seasonToLeagueId.keys()));
+
+  return { rosterLabel, seasonToLeagueId, rosterOwnerLabelFallback, maxSeasonInChain };
 }
 
 export async function GET(req: Request) {
@@ -145,31 +149,22 @@ export async function GET(req: Request) {
 
     const seasons = parseCsvNumbers(searchParams.get("seasons"));
     const types = parseCsvStrings(searchParams.get("types"));
-    const teams = parseCsvNumbers(searchParams.get("teams")); // rosterIds
+    const teams = parseCsvNumbers(searchParams.get("teams"));
 
-    // 1) League chain
     const chainLeagueIds = await getLeagueChainIds(rootLeagueId);
 
-    // 2) Roster labels + season->leagueId map for pick labels
-    const { rosterLabel, seasonToLeagueId } = await buildRosterLabelMap(chainLeagueIds);
+    const { rosterLabel, seasonToLeagueId, rosterOwnerLabelFallback, maxSeasonInChain } =
+      await buildRosterLabelMap(chainLeagueIds);
 
-    // 3) Prisma where
-    const where: any = {
-      leagueId: { in: chainLeagueIds },
-    };
-
+    const where: any = { leagueId: { in: chainLeagueIds } };
     if (seasons.length) where.season = { in: seasons };
     if (types.length) where.type = { in: types };
-
     if (teams.length) {
       where.assets = {
-        some: {
-          OR: [{ fromRosterId: { in: teams } }, { toRosterId: { in: teams } }],
-        },
+        some: { OR: [{ fromRosterId: { in: teams } }, { toRosterId: { in: teams } }] },
       };
     }
 
-    // 4) Count + page of txs
     const [totalCount, txs] = await Promise.all([
       db.transaction.count({ where }),
       db.transaction.findMany({
@@ -183,7 +178,6 @@ export async function GET(req: Request) {
 
     const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
-    // 5) Player map for this page
     const playerIds = uniq(
       txs
         .flatMap((t) => t.assets)
@@ -209,20 +203,17 @@ export async function GET(req: Request) {
       return parts.length ? `${name} (${parts.join(", ")})` : name;
     };
 
-    // Helper: find FAAB spent for a tx (waiver/FA)
     function getFaabSpent(t: any): number | null {
-      // Prefer stored faab asset
-      const faabAsset = (t.assets as any[]).find((a) => a.kind === "faab" && typeof a.faabAmount === "number");
+      const faabAsset = (t.assets as any[]).find(
+        (a) => a.kind === "faab" && typeof a.faabAmount === "number"
+      );
       if (faabAsset && typeof faabAsset.faabAmount === "number") return faabAsset.faabAmount;
-
-      // Fallback to rawJson.settings.waiver_bid (Sleeper)
       const raw = t.rawJson as any;
       const bid = toInt(raw?.settings?.waiver_bid);
       return bid !== null ? bid : null;
     }
 
-    // 6) Draft pick label with ORIGINAL OWNER (defensive)
-    function pickLabel(t: any, a: any) {
+    async function pickLabel(t: any, a: any) {
       const ys = typeof a.pickSeason === "number" ? a.pickSeason : null;
       const rd = typeof a.pickRound === "number" ? a.pickRound : null;
       if (!ys || !rd) return "Pick";
@@ -233,7 +224,6 @@ export async function GET(req: Request) {
       const toRid = typeof a.toRosterId === "number" ? a.toRosterId : null;
       const fromRid = typeof a.fromRosterId === "number" ? a.fromRosterId : null;
 
-      // Find best matching draft pick object from Sleeper rawJson
       let match: any =
         dp.find((p: any) => {
           const season = toInt(p?.season);
@@ -244,14 +234,11 @@ export async function GET(req: Request) {
           return (
             season === ys &&
             round === rd &&
-            // Owner should usually be "to" roster after the trade
             (toRid === null || owner === toRid || rosterId === toRid) &&
-            // Previous owner should usually be "from" roster
             (fromRid === null || prev === fromRid)
           );
         }) ?? null;
 
-      // Fallback: match by season+round only (some payloads omit prev/owner fields)
       if (!match) {
         match =
           dp.find((p: any) => {
@@ -261,23 +248,37 @@ export async function GET(req: Request) {
           }) ?? null;
       }
 
-      // Extract original owner roster id from any known field
       const original =
         toInt(match?.original_owner_id) ??
         toInt(match?.original_roster_id) ??
         toInt(match?.roster_id) ??
         null;
 
-      // IMPORTANT: label in the leagueId for THAT season (not the current season’s league)
-      const pickLeagueId = seasonToLeagueId.get(ys) ?? t.leagueId;
+      if (!original) return `${ys} R${rd}`;
 
-      const label = original ? rosterLabel(pickLeagueId, ys, original) : null;
+      // ✅ FUTURE-SEASON FIX:
+      // If pick season is beyond the chain (e.g., 2027/2028), label using the *transaction season*
+      // because that league’s rosters/users exist right now.
+      const labelSeason = ys > maxSeasonInChain ? t.season : ys;
+      const labelLeagueId =
+        ys > maxSeasonInChain ? t.leagueId : seasonToLeagueId.get(ys) ?? t.leagueId;
 
-      return label ? `${ys} R${rd} (${label} pick)` : `${ys} R${rd}`;
+      const base = rosterLabel(labelLeagueId, labelSeason, original);
+
+      if (!base.startsWith("Roster ")) {
+        return `${ys} R${rd} (${base} pick)`;
+      }
+
+      const fallbackName = await rosterOwnerLabelFallback(labelLeagueId, labelSeason, original);
+      if (fallbackName) {
+        return `${ys} R${rd} (${fallbackName} pick)`;
+      }
+
+      return `${ys} R${rd} (Roster ${original} pick)`;
     }
 
-    const assetLabel = (t: any, a: any) => {
-      if (a.kind === "pick") return pickLabel(t, a);
+    const assetLabel = async (t: any, a: any) => {
+      if (a.kind === "pick") return await pickLabel(t, a);
       if (a.kind === "faab") return `FAAB $${a.faabAmount ?? 0}`;
       if (a.playerId) return playerLabel(a.playerId);
       return a.kind ?? "asset";
@@ -305,12 +306,15 @@ export async function GET(req: Request) {
           .filter((x: any) => typeof x === "number")
       ) as number[];
 
-      const labels = rids.map((rid) => rosterLabel(t.leagueId, t.season, rid)).filter((x) => x !== "—");
+      const labels = rids
+        .map((rid) => rosterLabel(t.leagueId, t.season, rid))
+        .filter((x) => x !== "—");
       return labels.length ? labels.join(", ") : "—";
     }
 
-    // 7) Build response items
-    const items = txs.map((t) => {
+    const items: any[] = [];
+
+    for (const t of txs) {
       if (t.type === "trade") {
         const received = new Map<number, string[]>();
         const sent = new Map<number, string[]>();
@@ -320,7 +324,7 @@ export async function GET(req: Request) {
           const to = a.toRosterId;
 
           if (typeof from === "number" && typeof to === "number" && from !== to) {
-            const label = assetLabel(t, a);
+            const label = await assetLabel(t, a);
 
             const r = received.get(to) ?? [];
             r.push(label);
@@ -332,7 +336,9 @@ export async function GET(req: Request) {
           }
         }
 
-        const teamIds = uniq([...Array.from(received.keys()), ...Array.from(sent.keys())]).sort((a, b) => a - b);
+        const teamIds = uniq([...Array.from(received.keys()), ...Array.from(sent.keys())]).sort(
+          (a, b) => a - b
+        );
 
         const lines = teamIds.map((rid) => ({
           rosterId: rid,
@@ -341,7 +347,7 @@ export async function GET(req: Request) {
           sent: sent.get(rid) ?? [],
         }));
 
-        return {
+        items.push({
           id: t.id,
           leagueId: t.leagueId,
           season: t.season,
@@ -351,38 +357,34 @@ export async function GET(req: Request) {
           date: t.createdAt.toISOString(),
           teamsLabel: teamsLabel(t),
           moves: { kind: "trade" as const, lines },
-        };
+        });
+
+        continue;
       }
 
-      // Non-trades: Added/Dropped + FAAB spent for waivers
       const adds: string[] = [];
       const drops: string[] = [];
-
       const faabSpent = t.type === "waiver" ? getFaabSpent(t) : null;
 
       for (const a of t.assets as any[]) {
-        // players
         if (a.playerId) {
-          const labelBase = playerLabel(a.playerId);
+          const base = playerLabel(a.playerId);
+          const addLabel =
+            faabSpent && !a.fromRosterId && a.toRosterId ? `${base} (FAAB $${faabSpent})` : base;
 
-          // Added: attach FAAB if this is a waiver add and we have a bid
-          const label =
-            faabSpent && !a.fromRosterId && a.toRosterId ? `${labelBase} (FAAB $${faabSpent})` : labelBase;
-
-          if (a.fromRosterId && !a.toRosterId) drops.push(labelBase);
-          if (!a.fromRosterId && a.toRosterId) adds.push(label);
+          if (a.fromRosterId && !a.toRosterId) drops.push(base);
+          if (!a.fromRosterId && a.toRosterId) adds.push(addLabel);
           continue;
         }
 
-        // Picks / FAAB for non-trades (optional)
         if (a.kind === "pick") {
-          const label = assetLabel(t, a);
+          const label = await assetLabel(t, a);
           if (a.fromRosterId && !a.toRosterId) drops.push(label);
           if (!a.fromRosterId && a.toRosterId) adds.push(label);
         }
       }
 
-      return {
+      items.push({
         id: t.id,
         leagueId: t.leagueId,
         season: t.season,
@@ -392,8 +394,8 @@ export async function GET(req: Request) {
         date: t.createdAt.toISOString(),
         teamsLabel: teamsLabel(t),
         moves: { kind: "simple" as const, adds, drops },
-      };
-    });
+      });
+    }
 
     return NextResponse.json({
       ok: true,
