@@ -118,9 +118,43 @@ export async function getTransactions(leagueId: string, week: number) {
 
       settings?: {
         waiver_budget?: number;
+        waiver_bid?: number; // sometimes shows up depending on tx type/league
       };
     }>
   >(`/league/${leagueId}/transactions/${week}`);
+}
+
+/*
+  ---------------------------------------
+  Drafts + draft picks (for "pick used on" lookups)
+  ---------------------------------------
+*/
+
+export async function getLeagueDrafts(leagueId: string) {
+  return getJson<
+    Array<{
+      draft_id: string;
+      status?: string; // "complete", "in_progress", etc.
+      type?: string; // "rookie", "snake", etc. (varies)
+      season?: string | number;
+      start_time?: number;
+      created?: number;
+      settings?: Record<string, any>;
+      metadata?: Record<string, any>;
+    }>
+  >(`/league/${leagueId}/drafts`);
+}
+
+export async function getDraftPicks(draftId: string) {
+  return getJson<
+    Array<{
+      pick_no?: number;
+      round: number;
+      roster_id: number;
+      player_id: string | null;
+      metadata?: Record<string, any>;
+    }>
+  >(`/draft/${draftId}/picks`);
 }
 
 /*
