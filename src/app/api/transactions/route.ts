@@ -1,7 +1,7 @@
 // src/app/api/transactions/route.ts
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getLeague, getLeagueDrafts, getDraftPicks } from "@/lib/sleeper";
+import { getLeague, getLeagueDrafts, getDraft, getDraftPicks } from "@/lib/sleeper";
 
 type Facet = { value: string; label: string };
 type LeagueSeasonRow = { leagueId: string; season: number; previousLeagueId: string | null };
@@ -277,7 +277,7 @@ export async function GET(req: Request) {
 
     const pagePlayerMap = new Map(pagePlayers.map((p) => [p.id, p]));
 
-    // Full player label for player assets in transactions (keep POS/TEAM here)
+    // Full label for player assets in trades (keep POS/TEAM here)
     const playerLabel = (id: string) => {
       const p = pagePlayerMap.get(id);
       if (!p) return `Player ${id}`;
@@ -286,12 +286,20 @@ export async function GET(req: Request) {
       return parts.length ? `${name} (${parts.join(", ")})` : name;
     };
 
-    // ---- Draft pick "used on" lookup (request-level cache) ----
-    // key: `${leagueId}::${season}::${rosterId}::${round}` -> playerId
-    const draftedPlayerIdBySlot = new Map<string, string | null>();
+    // ---------------------------------------------------------------------
+    // Draft “used on” lookup (complete drafts only) – deterministic via slot
+    // ---------------------------------------------------------------------
+
+    // 1) rosterId -> draftSlot for a (leagueIdForSeason, season)
+    const draftSlotByRoster = new Map<string, number>(); // `${lid}::${season}::${rosterId}` -> slot(1..N)
+    const teamsCountByLeagueSeason = new Map<string, number>(); // `${lid}::${season}` -> N
+
+    // 2) pickNo -> drafted playerId for a (leagueIdForSeason, season)
+    const draftedPlayerIdByPickNo = new Map<string, string>(); // `${lid}::${season}::${pickNo}` -> playerId
+
     const draftLoadedForLeagueSeason = new Set<string>();
 
-    async function loadDraftSlotMapFor(leagueIdForSeason: string, season: number) {
+    async function loadDraftMapsFor(leagueIdForSeason: string, season: number) {
       const key = `${leagueIdForSeason}::${season}`;
       if (draftLoadedForLeagueSeason.has(key)) return;
       draftLoadedForLeagueSeason.add(key);
@@ -312,46 +320,76 @@ export async function GET(req: Request) {
 
         if (!preferred?.draft_id) return;
 
+        // draft_order tells us which slot each roster had (1..N)
+        const draft = await getDraft(preferred.draft_id);
+        const order = draft?.draft_order ?? null;
+        const rosterIds = order ? Object.keys(order) : [];
+        const N = rosterIds.length;
+        if (N > 0) teamsCountByLeagueSeason.set(key, N);
+
+        if (order) {
+          for (const [ridStr, slot] of Object.entries(order)) {
+            const rid = Number(ridStr);
+            if (!Number.isFinite(rid) || !Number.isFinite(slot)) continue;
+            draftSlotByRoster.set(`${leagueIdForSeason}::${season}::${rid}`, slot);
+          }
+        }
+
+        // Picks contain player_id; often also pick_no
         const picks = await getDraftPicks(preferred.draft_id);
         for (const p of picks || []) {
+          const pid = (p as any)?.player_id ?? null;
+          if (!pid) continue;
+
+          const pickNoRaw = (p as any)?.pick_no;
+          const pickNo = Number(pickNoRaw);
+
+          if (Number.isFinite(pickNo) && pickNo > 0) {
+            draftedPlayerIdByPickNo.set(`${leagueIdForSeason}::${season}::${pickNo}`, String(pid));
+            continue;
+          }
+
+          // Fallback if pick_no isn't present: compute from round + roster slot
           const round = Number((p as any)?.round);
           const rosterId = Number((p as any)?.roster_id);
-          if (!Number.isFinite(round) || !Number.isFinite(rosterId)) continue;
+          if (!Number.isFinite(round) || !Number.isFinite(rosterId) || !Number.isFinite(N) || N <= 0)
+            continue;
 
-          const pid = ((p as any)?.player_id ?? null) as string | null;
-          draftedPlayerIdBySlot.set(`${leagueIdForSeason}::${season}::${rosterId}::${round}`, pid);
+          const slot = draftSlotByRoster.get(`${leagueIdForSeason}::${season}::${rosterId}`);
+          if (!slot) continue;
+
+          const computedPickNo = (round - 1) * N + slot;
+          draftedPlayerIdByPickNo.set(
+            `${leagueIdForSeason}::${season}::${computedPickNo}`,
+            String(pid)
+          );
         }
       } catch {
         // best-effort only
       }
     }
 
-    // Pre-load draft lookups for any picks on this page
-    const neededDraftLookups = new Set<string>(); // `${lidForNames}::${ys}`
+    // Pre-load draft maps for any pick assets on this page
+    const neededDraftLoads = new Set<string>(); // `${lidForNames}::${ys}`
     for (const t of rows as any[]) {
       for (const a of t.assets || []) {
         if (a.kind !== "pick") continue;
         const ys = typeof a.pickSeason === "number" ? a.pickSeason : null;
         if (ys === null) continue;
         const lidForNames = seasonToLeagueId.get(ys) || seasonToLeagueId.get(t.season) || t.leagueId;
-        neededDraftLookups.add(`${lidForNames}::${ys}`);
+        neededDraftLoads.add(`${lidForNames}::${ys}`);
       }
     }
 
-    for (const k of neededDraftLookups) {
+    for (const k of neededDraftLoads) {
       const [lid, s] = k.split("::");
       const season = Number(s);
       if (!lid || !Number.isFinite(season)) continue;
-      await loadDraftSlotMapFor(lid, season);
+      await loadDraftMapsFor(lid, season);
     }
 
-    // Load drafted player rows so drafted player NAME shows reliably
-    const draftedIds = uniq(
-      Array.from(draftedPlayerIdBySlot.values()).filter(
-        (x): x is string => typeof x === "string" && x.length > 0
-      )
-    );
-
+    // Load drafted player names (name only, no pos/team) so it displays reliably
+    const draftedIds = uniq(Array.from(draftedPlayerIdByPickNo.values()));
     const draftedPlayers =
       draftedIds.length > 0
         ? await db.sleeperPlayer.findMany({
@@ -361,10 +399,11 @@ export async function GET(req: Request) {
         : [];
 
     const draftedPlayerNameMap = new Map(draftedPlayers.map((p) => [p.id, p.fullName ?? p.id]));
+    const draftedNameOnly = (id: string) => draftedPlayerNameMap.get(id) ?? id;
 
-    // Drafted player label inside pick parentheses: JUST the name (no pos/team)
-    const draftedPlayerNameOnly = (id: string) => draftedPlayerNameMap.get(id) ?? id;
-
+    // ---------------------------------------
+    // Pick labeling
+    // ---------------------------------------
     function pickLabel(t: any, a: any) {
       const ys = typeof a.pickSeason === "number" ? a.pickSeason : null;
       const rd = typeof a.pickRound === "number" ? a.pickRound : null;
@@ -372,7 +411,6 @@ export async function GET(req: Request) {
       const core = `${ys ?? "?"} R${rd ?? "?"}`;
       if (ys === null || rd === null) return core;
 
-      const seasonForNames = ys;
       const lidForNames = seasonToLeagueId.get(ys) || seasonToLeagueId.get(t.season) || t.leagueId;
 
       const draftPicks: any[] = Array.isArray(t.rawJson?.draft_picks) ? t.rawJson.draft_picks : [];
@@ -384,7 +422,7 @@ export async function GET(req: Request) {
         return Number.isFinite(ps) && Number.isFinite(pr) && ps === ys && pr === rd;
       });
 
-      // If we have from/to rosterIds, try to match the transfer precisely
+      // Try to match the transfer precisely when we can
       let match: any | null = null;
       if (typeof a.fromRosterId === "number" && typeof a.toRosterId === "number") {
         const exact = candidates.filter(
@@ -396,26 +434,34 @@ export async function GET(req: Request) {
       // If still no match, only accept a single unambiguous candidate
       if (!match && candidates.length === 1) match = candidates[0];
 
-      // If ambiguous (multiple candidates), do NOT guess (prevents “same pick twice” labeling)
+      // If ambiguous (multiple candidates), do NOT guess
       if (!match) return core;
 
       const originalRoster =
         typeof match?.roster_id === "number" ? (match.roster_id as number) : null;
 
       const originalTeam =
-        originalRoster !== null ? rosterLabel(lidForNames, seasonForNames, originalRoster) : null;
+        originalRoster !== null ? rosterLabel(lidForNames, ys, originalRoster) : null;
 
       if (!originalTeam) return core;
 
-      let draftedName: string | null = null;
-      if (originalRoster !== null) {
-        const key = `${lidForNames}::${ys}::${originalRoster}::${rd}`;
-        const pid = draftedPlayerIdBySlot.get(key);
-        if (pid) draftedName = draftedPlayerNameOnly(pid);
+      // If draft is complete, deterministically map (round + original roster slot) -> pickNo -> player
+      let drafted: string | null = null;
+      const N = teamsCountByLeagueSeason.get(`${lidForNames}::${ys}`) ?? null;
+      const slot =
+        originalRoster !== null
+          ? draftSlotByRoster.get(`${lidForNames}::${ys}::${originalRoster}`) ?? null
+          : null;
+
+      if (N && slot && N > 0 && slot > 0) {
+        const pickNo = (rd - 1) * N + slot;
+        const pid = draftedPlayerIdByPickNo.get(`${lidForNames}::${ys}::${pickNo}`) ?? null;
+        if (pid) drafted = draftedNameOnly(pid);
       }
 
-      const extra = draftedName ? ` ${draftedName}` : "";
-      return `${core} (${originalTeam} pick${extra})`;
+      // IMPORTANT: return a stable string we can style in the client
+      // Format: "YYYY RX (Owner pick <player?>)"
+      return drafted ? `${core} (${originalTeam} pick ${drafted})` : `${core} (${originalTeam} pick)`;
     }
 
     function assetLabel(t: any, a: any) {
@@ -483,6 +529,7 @@ export async function GET(req: Request) {
         };
       }
 
+      // Non-trades: Added/Dropped + FAAB for waivers
       const addedMap = new Map<number, { items: string[]; faab?: number }>();
       const droppedMap = new Map<number, string[]>();
 

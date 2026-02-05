@@ -69,17 +69,40 @@ function fmtDate(iso: string) {
   }
 }
 
-// "2025 R1 (Brigantix7x pick Emeka Egbuka)"
-// -> italicize "Emeka Egbuka" in grey
-function renderMaybeDraftedPick(text: string) {
-  const m = text.match(/^(.*\(\s*[^)]+ pick)\s+(.+)\)$/);
-  if (!m) return <>{text}</>;
-  const left = m[1];
-  const player = m[2];
+// Render list of strings with commas, but allow styling for pick labels
+function renderCommaList(items: string[]) {
+  return items.map((txt, i) => (
+    <React.Fragment key={`${txt}-${i}`}>
+      {i > 0 ? ", " : null}
+      {renderAssetText(txt)}
+    </React.Fragment>
+  ));
+}
+
+// Expected format from API:
+// "YYYY RX (Owner pick)" or "YYYY RX (Owner pick Player Name)"
+function renderAssetText(txt: string) {
+  const m = txt.match(/^(\d{4}\sR\d+)\s+\((.+?)\spick(?:\s(.+))?\)$/);
+  if (!m) return <>{txt}</>;
+
+  const core = m[1];
+  const owner = m[2];
+  const drafted = (m[3] ?? "").trim();
+
   return (
     <>
-      {left} <span className="italic text-zinc-500">{player}</span>
-      {")"}
+      {core}{" "}
+      <span className="text-zinc-700">
+        (
+        {owner} pick
+        {drafted ? (
+          <>
+            {" "}
+            <span className="italic text-zinc-500">{drafted}</span>
+          </>
+        ) : null}
+        )
+      </span>
     </>
   );
 }
@@ -98,7 +121,8 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
 
   // Player search
   const [playerQ, setPlayerQ] = React.useState("");
-  const [playerId, setPlayerId] = React.useState<string | null>(null);
+  const [playerIdSel, setPlayerIdSel] = React.useState<string | null>(null);
+
   const [playerOpen, setPlayerOpen] = React.useState(false);
   const [playerLoading, setPlayerLoading] = React.useState(false);
   const [playerResults, setPlayerResults] = React.useState<PlayerSearchResp["results"]>([]);
@@ -113,7 +137,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
         season: seasonSel.join(","),
         type: typeSel.join(","),
         team: teamSel.join(","),
-        playerId: playerId ?? "",
+        playerId: playerIdSel ?? "",
         page,
         pageSize,
       });
@@ -133,17 +157,19 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
     } finally {
       setLoading(false);
     }
-  }, [rootLeagueId, seasonSel, typeSel, teamSel, page, playerId]);
+  }, [rootLeagueId, seasonSel, typeSel, teamSel, playerIdSel, page]);
 
   React.useEffect(() => {
     load();
   }, [load]);
 
+  // reset to page 1 when filters change
   React.useEffect(() => {
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seasonSel.join(","), typeSel.join(","), teamSel.join(","), playerId ?? ""]);
+  }, [seasonSel.join(","), typeSel.join(","), teamSel.join(","), playerIdSel ?? ""]);
 
+  // Player autocomplete (>= 3 chars)
   React.useEffect(() => {
     let alive = true;
 
@@ -192,9 +218,20 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
     setTypeSel([]);
     setTeamSel([]);
     setPlayerQ("");
-    setPlayerId(null);
+    setPlayerIdSel(null);
     setPlayerResults([]);
   }
+
+  // If no server-side playerId selected, do a soft client-side filter for convenience
+  const filteredItems = React.useMemo(() => {
+    if (!data?.items) return [];
+    if (playerIdSel) return data.items;
+
+    const q = playerQ.trim().toLowerCase();
+    if (q.length < 3) return data.items;
+
+    return data.items.filter((t) => JSON.stringify(t).toLowerCase().includes(q));
+  }, [data?.items, playerQ, playerIdSel]);
 
   const totalPages = data?.totalPages ?? 1;
 
@@ -205,7 +242,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
       }`}
     >
       <div>
-        Showing <span className="font-semibold text-zinc-900">{data?.items?.length ?? 0}</span>
+        Showing <span className="font-semibold text-zinc-900">{filteredItems.length}</span>
         {data ? (
           <>
             {" "}
@@ -309,6 +346,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
         </div>
       </div>
 
+      {/* Filters */}
       <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm space-y-4">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <CheckList
@@ -331,6 +369,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
           />
         </div>
 
+        {/* Player search */}
         <div className="pt-2">
           <div className="text-sm font-semibold text-zinc-900">Player search</div>
           <div className="relative mt-2 max-w-xl">
@@ -340,11 +379,12 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
                 const v = e.target.value;
                 setPlayerQ(v);
                 setPlayerOpen(true);
-                setPlayerId(null);
+                // If user edits the text, clear selected ID so results update sensibly
+                setPlayerIdSel(null);
               }}
               onFocus={() => setPlayerOpen(true)}
               onBlur={() => setTimeout(() => setPlayerOpen(false), 150)}
-              placeholder="Type 3+ chars (e.g. montgomery)…"
+              placeholder="Type 3+ chars (e.g. montgomery, metchie)…"
               className="w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-900 outline-none focus:border-zinc-900"
             />
 
@@ -368,7 +408,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={() => {
                           setPlayerQ(name);
-                          setPlayerId(p.id);
+                          setPlayerIdSel(p.id); // server-side filter becomes deterministic
                           setPlayerOpen(false);
                         }}
                       >
@@ -384,7 +424,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
           </div>
 
           <div className="mt-2 text-xs text-zinc-500">
-            Select a suggestion to filter the full league history by that player.
+            Tip: click a suggestion to lock in a specific player (server-side filter).
           </div>
         </div>
       </div>
@@ -415,7 +455,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
           </thead>
 
           <tbody>
-            {(data?.items ?? []).map((t) => (
+            {filteredItems.map((t) => (
               <tr key={t.id} className="border-t align-top">
                 <td className="p-3 whitespace-nowrap">{t.season}</td>
                 <td className="p-3 whitespace-nowrap">{fmtDate(t.createdAt)}</td>
@@ -427,18 +467,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
                       {t.received.map((r) => (
                         <div key={`recv-${r.rosterId}`} className="leading-snug">
                           <div className="font-semibold text-zinc-900">{r.team} received</div>
-                          <div className="text-zinc-700">
-                            {r.items.length ? (
-                              r.items.map((it, idx) => (
-                                <span key={`${r.rosterId}-${idx}`}>
-                                  {idx > 0 ? ", " : ""}
-                                  {renderMaybeDraftedPick(it)}
-                                </span>
-                              ))
-                            ) : (
-                              "—"
-                            )}
-                          </div>
+                          <div className="text-zinc-700">{r.items.length ? renderCommaList(r.items) : "—"}</div>
                         </div>
                       ))}
                     </div>
@@ -449,12 +478,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
                           {t.added.map((a) => (
                             <div key={`add-${a.rosterId}`} className="text-emerald-800">
                               <span className="font-semibold">{a.team}</span>: Added{" "}
-                              {a.items.map((it, idx) => (
-                                <span key={`${a.rosterId}-a-${idx}`}>
-                                  {idx > 0 ? ", " : ""}
-                                  {renderMaybeDraftedPick(it)}
-                                </span>
-                              ))}
+                              {a.items.length ? renderCommaList(a.items) : "—"}
                               {typeof a.faab === "number" && a.faab > 0 ? (
                                 <span className="ml-2 text-emerald-900 font-semibold">
                                   (FAAB ${a.faab})
@@ -470,12 +494,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
                           {t.dropped.map((d) => (
                             <div key={`drop-${d.rosterId}`} className="text-rose-800">
                               <span className="font-semibold">{d.team}</span>: Dropped{" "}
-                              {d.items.map((it, idx) => (
-                                <span key={`${d.rosterId}-d-${idx}`}>
-                                  {idx > 0 ? ", " : ""}
-                                  {renderMaybeDraftedPick(it)}
-                                </span>
-                              ))}
+                              {d.items.length ? renderCommaList(d.items) : "—"}
                             </div>
                           ))}
                         </div>
@@ -491,7 +510,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
               </tr>
             ))}
 
-            {(data?.items?.length ?? 0) === 0 && (
+            {filteredItems.length === 0 && (
               <tr>
                 <td className="p-6 text-zinc-600" colSpan={5}>
                   No transactions match the current filters.
