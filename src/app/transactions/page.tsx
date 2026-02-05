@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import FiltersClient from "./FiltersClient";
+import { getLeague } from "@/lib/sleeper";
 
 export const dynamic = "force-dynamic";
 
@@ -36,8 +37,25 @@ function uniq<T>(arr: T[]) {
   return Array.from(new Set(arr));
 }
 
+async function getLeagueChainIds(startLeagueId: string, max = 20) {
+  const ids: string[] = [];
+  let cur: string | null = startLeagueId;
+
+  while (cur && ids.length < max) {
+    ids.push(cur);
+    const l: any = await getLeague(cur);
+    cur = l?.previous_league_id ?? null;
+  }
+
+  return ids;
+}
+
 export default async function TransactionsPage({ searchParams }: Props) {
-  const leagueId = process.env.SLEEPER_LEAGUE_ID!;
+  const rootLeagueId = process.env.SLEEPER_LEAGUE_ID!;
+  if (!rootLeagueId) throw new Error("Missing SLEEPER_LEAGUE_ID env var");
+
+  // ✅ IMPORTANT: query across the whole chain (2026 + previous years)
+  const leagueIds = await getLeagueChainIds(rootLeagueId);
 
   const seasonParam = searchParams?.season ?? "all";
   const teamParam = searchParams?.team ?? "all";
@@ -45,7 +63,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
   const page = Math.max(1, Number(searchParams?.page ?? 1));
 
   // ---- Filters ----
-  const where: any = { leagueId };
+  const where: any = { leagueId: { in: leagueIds } };
   if (seasonParam !== "all") where.season = Number(seasonParam);
   if (typeParam !== "all") where.type = typeParam;
 
@@ -54,16 +72,16 @@ export default async function TransactionsPage({ searchParams }: Props) {
     where.assets = { some: { OR: [{ fromRosterId: teamId }, { toRosterId: teamId }] } };
   }
 
-  // ---- Dropdown data ----
+  // ---- Dropdown data (across chain) ----
   const [seasonRows, typeRows] = await Promise.all([
     db.transaction.findMany({
-      where: { leagueId },
+      where: { leagueId: { in: leagueIds } },
       distinct: ["season"],
       select: { season: true },
       orderBy: { season: "desc" },
     }),
     db.transaction.findMany({
-      where: { leagueId },
+      where: { leagueId: { in: leagueIds } },
       distinct: ["type"],
       select: { type: true },
     }),
@@ -184,8 +202,14 @@ export default async function TransactionsPage({ searchParams }: Props) {
   const seasonForRosterDropdown =
     seasonParam !== "all" ? Number(seasonParam) : seasons[0] ?? new Date().getFullYear();
 
+  // Use the leagueId from the chain that matches this season if possible
+  const leagueIdForRosterDropdown =
+    transactions.find((t) => t.season === seasonForRosterDropdown)?.leagueId ??
+    leagueIds[0] ??
+    rootLeagueId;
+
   const rosterRowsForDropdown = await db.roster.findMany({
-    where: { leagueId, season: seasonForRosterDropdown },
+    where: { leagueId: leagueIdForRosterDropdown, season: seasonForRosterDropdown },
     select: { rosterId: true },
     orderBy: { rosterId: "asc" },
   });
@@ -194,11 +218,10 @@ export default async function TransactionsPage({ searchParams }: Props) {
     rosterRowsForDropdown.length > 0
       ? rosterRowsForDropdown.map((r) => ({
           id: r.rosterId,
-          label: rosterLabel(leagueId, seasonForRosterDropdown, r.rosterId),
+          label: rosterLabel(leagueIdForRosterDropdown, seasonForRosterDropdown, r.rosterId),
         }))
       : Array.from({ length: 20 }, (_, i) => ({ id: i + 1, label: `Roster ${i + 1}` }));
 
-  // ---- Column renderers ----
   function getTeamsString(t: any) {
     if (t.type === "trade") {
       const involved: number[] = [];
@@ -249,7 +272,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
           list.push(label);
           sent.set(from, list);
         }
-
         if (to !== null) {
           involved.add(to);
           const list = received.get(to) ?? [];
@@ -285,7 +307,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
       );
     }
 
-    // Non-trades: Added/Dropped
     const adds: string[] = [];
     const drops: string[] = [];
 
@@ -316,10 +337,13 @@ export default async function TransactionsPage({ searchParams }: Props) {
         <p className="mt-1 text-sm text-zinc-600">
           Showing <span className="font-semibold text-zinc-900">{totalCount}</span> total
         </p>
+        <p className="mt-1 text-xs text-zinc-500">
+          League chain IDs: {leagueIds.length} seasons detected
+        </p>
       </div>
 
       <FiltersClient
-        rootParam={leagueId}
+        rootParam={rootLeagueId}
         seasonParam={seasonParam}
         teamParam={teamParam}
         typeParam={typeParam}
