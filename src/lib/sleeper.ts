@@ -185,18 +185,3 @@ export async function getDraftPicks(draftId: string) {
 export async function getAllNflPlayers() {
   return getJson<Record<string, any>>(`/players/nfl`);
 }
-/*
-  ---------------------------------------
-  Single draft metadata (includes draft_order)
-  ---------------------------------------
-*/
-export async function getDraft(draftId: string) {
-  return getJson<{
-    draft_id: string;
-    season: string | number;
-    status?: string;
-    type?: string;
-    // draft_order: { [roster_id: number]: slot(1..N) }
-    draft_order?: Record<string, number>;
-  }>(`/draft/${draftId}`);
-}
