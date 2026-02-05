@@ -13,6 +13,10 @@ function prettyType(type: string) {
     .join(" ");
 }
 
+function uniq<T>(arr: T[]) {
+  return Array.from(new Set(arr));
+}
+
 export default async function TransactionsPage() {
   const rootLeagueId = process.env.SLEEPER_LEAGUE_ID!;
   if (!rootLeagueId) {
@@ -25,8 +29,8 @@ export default async function TransactionsPage() {
     );
   }
 
-  // These dropdown options are "starter lists".
-  // The real results come from /api/transactions using the league chain.
+  // Starter lists (real results are pulled from /api/transactions).
+  // We'll still populate checkboxes with real values from DB to avoid "Roster 1".
   const seasonRows = await db.transaction.findMany({
     distinct: ["season"],
     select: { season: true },
@@ -38,25 +42,56 @@ export default async function TransactionsPage() {
     select: { type: true },
   });
 
-  // Team options: use current season rosters if available; fallback to roster 1-20
   const latestSeason = seasonRows[0]?.season ?? new Date().getFullYear();
 
-  const rosterRows = await db.roster.findMany({
+  // Pull rosters for the latest season for THIS root league id
+  const rosters = await db.roster.findMany({
     where: { leagueId: rootLeagueId, season: latestSeason },
-    select: { rosterId: true },
+    select: { rosterId: true, ownerId: true },
     orderBy: { rosterId: "asc" },
   });
 
-  const seasons: Option[] = seasonRows.map((s) => ({ value: String(s.season), label: String(s.season) }));
+  const ownerIds = uniq(rosters.map((r) => r.ownerId).filter((x): x is string => !!x));
+
+  const owners =
+    ownerIds.length > 0
+      ? await db.sleeperUser.findMany({
+          where: { sleeperUserId: { in: ownerIds } },
+          select: { sleeperUserId: true, displayName: true, username: true },
+        })
+      : [];
+
+  const ownerMap = new Map(
+    owners.map((o) => [o.sleeperUserId, o.displayName ?? o.username ?? o.sleeperUserId])
+  );
+
+  const seasons: Option[] = seasonRows.map((s) => ({
+    value: String(s.season),
+    label: String(s.season),
+  }));
 
   const types: Option[] = (typeRows.map((t) => t.type).filter(Boolean) as string[])
     .sort()
     .map((t) => ({ value: t, label: prettyType(t) }));
 
+  // Teams: use owner label if available, fall back to roster id
   const teams: Option[] =
-    rosterRows.length > 0
-      ? rosterRows.map((r) => ({ value: String(r.rosterId), label: `Roster ${r.rosterId}` }))
-      : Array.from({ length: 20 }, (_, i) => ({ value: String(i + 1), label: `Roster ${i + 1}` }));
+    rosters.length > 0
+      ? rosters.map((r) => ({
+          value: String(r.rosterId),
+          label: (r.ownerId && ownerMap.get(r.ownerId)) || `Roster ${r.rosterId}`,
+        }))
+      : Array.from({ length: 20 }, (_, i) => ({
+          value: String(i + 1),
+          label: `Roster ${i + 1}`,
+        }));
 
-  return <TransactionsClient rootLeagueId={rootLeagueId} seasons={seasons} types={types} teams={teams} />;
+  return (
+    <TransactionsClient
+      rootLeagueId={rootLeagueId}
+      seasons={seasons}
+      types={types}
+      teams={teams}
+    />
+  );
 }

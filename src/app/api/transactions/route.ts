@@ -44,8 +44,8 @@ function parseCsvStrings(v: string | null): string[] {
 }
 
 /**
- * Walks the Sleeper "previous_league_id" chain.
- * Returns an array like [current, prev, prevPrev, ...]
+ * Walk the Sleeper previous_league_id chain.
+ * Returns [current, previous, ...]
  */
 async function getLeagueChainIds(startLeagueId: string) {
   const ids: string[] = [];
@@ -67,12 +67,10 @@ async function getLeagueChainIds(startLeagueId: string) {
 
 /**
  * Build rosterLabel lookup:
- * - Key: `${leagueId}::${season}::${rosterId}`
- * - Value: owner displayName/username fallback, else "Roster X"
+ * key: `${leagueId}::${season}::${rosterId}` -> label
+ * plus season -> leagueId map for correct pick-season labeling.
  */
 async function buildRosterLabelMap(leagueIds: string[]) {
-  // Get all seasons for these leagues from Sleeper (we need season in the key).
-  // Also build season -> leagueId map here.
   const seasonToLeagueId = new Map<number, string>();
   const leagueSeasonPairs: Array<{ leagueId: string; season: number }> = [];
 
@@ -105,7 +103,12 @@ async function buildRosterLabelMap(leagueIds: string[]) {
         })
       : [];
 
-  const ownerMap = new Map(owners.map((o) => [o.sleeperUserId, o.displayName ?? o.username ?? o.sleeperUserId]));
+  const ownerMap = new Map(
+    owners.map((o) => [
+      o.sleeperUserId,
+      o.displayName ?? o.username ?? o.sleeperUserId,
+    ])
+  );
 
   const rosterLabelMap = new Map<string, string>();
   for (const r of rosterRows) {
@@ -125,27 +128,32 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
 
-    // Client sends rootLeagueId; fallback to env if omitted
     const rootLeagueId = searchParams.get("rootLeagueId") || process.env.SLEEPER_LEAGUE_ID;
     if (!rootLeagueId) {
-      return NextResponse.json({ ok: false, error: "Missing rootLeagueId (or SLEEPER_LEAGUE_ID env)." }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "Missing rootLeagueId (or SLEEPER_LEAGUE_ID env)." },
+        { status: 400 }
+      );
     }
 
     const page = Math.max(1, Number(searchParams.get("page") ?? 1));
     const pageSizeRaw = Number(searchParams.get("pageSize") ?? DEFAULT_PAGE_SIZE);
-    const pageSize = Math.max(1, Math.min(DEFAULT_PAGE_SIZE, Number.isFinite(pageSizeRaw) ? pageSizeRaw : DEFAULT_PAGE_SIZE));
+    const pageSize = Math.max(
+      1,
+      Math.min(DEFAULT_PAGE_SIZE, Number.isFinite(pageSizeRaw) ? pageSizeRaw : DEFAULT_PAGE_SIZE)
+    );
 
     const seasons = parseCsvNumbers(searchParams.get("seasons"));
     const types = parseCsvStrings(searchParams.get("types"));
     const teams = parseCsvNumbers(searchParams.get("teams")); // rosterIds
 
-    // 1) League chain (so we can query all seasons in history)
+    // 1) League chain
     const chainLeagueIds = await getLeagueChainIds(rootLeagueId);
 
-    // 2) Roster label map + season -> leagueId map (THIS IS THE KEY FIX FOR PICK LABELS)
+    // 2) Roster labels + season->leagueId map for pick labels
     const { rosterLabel, seasonToLeagueId } = await buildRosterLabelMap(chainLeagueIds);
 
-    // 3) Build Prisma where
+    // 3) Prisma where
     const where: any = {
       leagueId: { in: chainLeagueIds },
     };
@@ -156,15 +164,12 @@ export async function GET(req: Request) {
     if (teams.length) {
       where.assets = {
         some: {
-          OR: [
-            { fromRosterId: { in: teams } },
-            { toRosterId: { in: teams } },
-          ],
+          OR: [{ fromRosterId: { in: teams } }, { toRosterId: { in: teams } }],
         },
       };
     }
 
-    // 4) Count + page
+    // 4) Count + page of txs
     const [totalCount, txs] = await Promise.all([
       db.transaction.count({ where }),
       db.transaction.findMany({
@@ -204,7 +209,19 @@ export async function GET(req: Request) {
       return parts.length ? `${name} (${parts.join(", ")})` : name;
     };
 
-    // 6) Pick label using original owner roster in the PICK SEASON LEAGUE
+    // Helper: find FAAB spent for a tx (waiver/FA)
+    function getFaabSpent(t: any): number | null {
+      // Prefer stored faab asset
+      const faabAsset = (t.assets as any[]).find((a) => a.kind === "faab" && typeof a.faabAmount === "number");
+      if (faabAsset && typeof faabAsset.faabAmount === "number") return faabAsset.faabAmount;
+
+      // Fallback to rawJson.settings.waiver_bid (Sleeper)
+      const raw = t.rawJson as any;
+      const bid = toInt(raw?.settings?.waiver_bid);
+      return bid !== null ? bid : null;
+    }
+
+    // 6) Draft pick label with ORIGINAL OWNER (defensive)
     function pickLabel(t: any, a: any) {
       const ys = typeof a.pickSeason === "number" ? a.pickSeason : null;
       const rd = typeof a.pickRound === "number" ? a.pickRound : null;
@@ -216,35 +233,44 @@ export async function GET(req: Request) {
       const toRid = typeof a.toRosterId === "number" ? a.toRosterId : null;
       const fromRid = typeof a.fromRosterId === "number" ? a.fromRosterId : null;
 
-      // try to match the specific pick in rawJson
-      let match =
+      // Find best matching draft pick object from Sleeper rawJson
+      let match: any =
         dp.find((p: any) => {
           const season = toInt(p?.season);
           const round = toInt(p?.round);
           const owner = toInt(p?.owner_id);
           const prev = toInt(p?.previous_owner_id);
+          const rosterId = toInt(p?.roster_id);
           return (
             season === ys &&
             round === rd &&
-            (toRid === null || owner === toRid) &&
+            // Owner should usually be "to" roster after the trade
+            (toRid === null || owner === toRid || rosterId === toRid) &&
+            // Previous owner should usually be "from" roster
             (fromRid === null || prev === fromRid)
           );
         }) ?? null;
 
-      if (!match && toRid !== null) {
+      // Fallback: match by season+round only (some payloads omit prev/owner fields)
+      if (!match) {
         match =
           dp.find((p: any) => {
             const season = toInt(p?.season);
             const round = toInt(p?.round);
-            const owner = toInt(p?.owner_id);
-            return season === ys && round === rd && owner === toRid;
+            return season === ys && round === rd;
           }) ?? null;
       }
 
-      const original = toInt(match?.original_owner_id) ?? null;
+      // Extract original owner roster id from any known field
+      const original =
+        toInt(match?.original_owner_id) ??
+        toInt(match?.original_roster_id) ??
+        toInt(match?.roster_id) ??
+        null;
 
-      // The important part: label in the leagueId that matches the pick season
+      // IMPORTANT: label in the leagueId for THAT season (not the current season’s league)
       const pickLeagueId = seasonToLeagueId.get(ys) ?? t.leagueId;
+
       const label = original ? rosterLabel(pickLeagueId, ys, original) : null;
 
       return label ? `${ys} R${rd} (${label} pick)` : `${ys} R${rd}`;
@@ -257,11 +283,10 @@ export async function GET(req: Request) {
       return a.kind ?? "asset";
     };
 
-    // 7) Render helpers
     function teamsLabel(t: any) {
       if (t.type === "trade") {
         const involved: number[] = [];
-        for (const a of t.assets) {
+        for (const a of t.assets as any[]) {
           if (typeof a.fromRosterId === "number") involved.push(a.fromRosterId);
           if (typeof a.toRosterId === "number") involved.push(a.toRosterId);
         }
@@ -274,9 +299,8 @@ export async function GET(req: Request) {
         return clean[0] ?? "—";
       }
 
-      // non-trade: most of the time one team
       const rids = uniq(
-        t.assets
+        (t.assets as any[])
           .flatMap((a: any) => [a.fromRosterId, a.toRosterId])
           .filter((x: any) => typeof x === "number")
       ) as number[];
@@ -285,10 +309,9 @@ export async function GET(req: Request) {
       return labels.length ? labels.join(", ") : "—";
     }
 
-    // 8) Build response items
+    // 7) Build response items
     const items = txs.map((t) => {
       if (t.type === "trade") {
-        // Build per-team received + sent by looking at movement between two different rosters
         const received = new Map<number, string[]>();
         const sent = new Map<number, string[]>();
 
@@ -331,23 +354,29 @@ export async function GET(req: Request) {
         };
       }
 
-      // non-trade: Added/Dropped based on null from/to
+      // Non-trades: Added/Dropped + FAAB spent for waivers
       const adds: string[] = [];
       const drops: string[] = [];
+
+      const faabSpent = t.type === "waiver" ? getFaabSpent(t) : null;
 
       for (const a of t.assets as any[]) {
         // players
         if (a.playerId) {
-          const label = playerLabel(a.playerId);
-          if (a.fromRosterId && !a.toRosterId) drops.push(label);
+          const labelBase = playerLabel(a.playerId);
+
+          // Added: attach FAAB if this is a waiver add and we have a bid
+          const label =
+            faabSpent && !a.fromRosterId && a.toRosterId ? `${labelBase} (FAAB $${faabSpent})` : labelBase;
+
+          if (a.fromRosterId && !a.toRosterId) drops.push(labelBase);
           if (!a.fromRosterId && a.toRosterId) adds.push(label);
           continue;
         }
 
-        // picks/faab for non-trades (optional, but nice to show)
-        if (a.kind === "pick" || a.kind === "faab") {
+        // Picks / FAAB for non-trades (optional)
+        if (a.kind === "pick") {
           const label = assetLabel(t, a);
-          // if it has a toRosterId, treat as add; if it has fromRosterId, treat as drop
           if (a.fromRosterId && !a.toRosterId) drops.push(label);
           if (!a.fromRosterId && a.toRosterId) adds.push(label);
         }
