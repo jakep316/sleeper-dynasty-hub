@@ -114,11 +114,11 @@ export async function getTransactions(leagueId: string, week: number) {
         round: number;
         owner_id: number | null;
         previous_owner_id: number | null;
+        roster_id?: number | null; // original roster slot (often present in Sleeper tx payloads)
       }>;
 
       settings?: {
         waiver_budget?: number;
-        waiver_bid?: number; // sometimes shows up depending on tx type/league
       };
     }>
   >(`/league/${leagueId}/transactions/${week}`);
@@ -126,7 +126,7 @@ export async function getTransactions(leagueId: string, week: number) {
 
 /*
   ---------------------------------------
-  Drafts + draft picks (for "pick used on" lookups)
+  Drafts for a league
   ---------------------------------------
 */
 
@@ -134,25 +134,43 @@ export async function getLeagueDrafts(leagueId: string) {
   return getJson<
     Array<{
       draft_id: string;
-      status?: string; // "complete", "in_progress", etc.
-      type?: string; // "rookie", "snake", etc. (varies)
-      season?: string | number;
-      start_time?: number;
-      created?: number;
-      settings?: Record<string, any>;
-      metadata?: Record<string, any>;
+      season: string | number;
+      type?: string;
+      status?: string;
     }>
   >(`/league/${leagueId}/drafts`);
 }
 
+/*
+  ---------------------------------------
+  Single draft metadata (includes draft_order)
+  ---------------------------------------
+*/
+
+export async function getDraft(draftId: string) {
+  return getJson<{
+    draft_id: string;
+    season: string | number;
+    status?: string;
+    type?: string;
+    // draft_order: { [roster_id: number]: slot(1..N) }
+    draft_order?: Record<string, number>;
+  }>(`/draft/${draftId}`);
+}
+
+/*
+  ---------------------------------------
+  Draft picks for a draft
+  ---------------------------------------
+*/
+
 export async function getDraftPicks(draftId: string) {
   return getJson<
     Array<{
-      pick_no?: number;
       round: number;
-      roster_id: number;
+      roster_id: number | null;
       player_id: string | null;
-      metadata?: Record<string, any>;
+      pick_no?: number; // often present
     }>
   >(`/draft/${draftId}/picks`);
 }
@@ -166,4 +184,19 @@ export async function getDraftPicks(draftId: string) {
 
 export async function getAllNflPlayers() {
   return getJson<Record<string, any>>(`/players/nfl`);
+}
+/*
+  ---------------------------------------
+  Single draft metadata (includes draft_order)
+  ---------------------------------------
+*/
+export async function getDraft(draftId: string) {
+  return getJson<{
+    draft_id: string;
+    season: string | number;
+    status?: string;
+    type?: string;
+    // draft_order: { [roster_id: number]: slot(1..N) }
+    draft_order?: Record<string, number>;
+  }>(`/draft/${draftId}`);
 }
