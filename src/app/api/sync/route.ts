@@ -1,12 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import {
-  getLeague,
-  getLeagueUsers,
-  getLeagueRosters,
-  getMatchups,      // <-- FIX
-  getTransactions,  // <-- FIX
-} from "@/lib/sleeper";
+import { getLeague, getUsers, getRosters, getMatchups, getTransactions } from "@/lib/sleeper";
 
 /*
   Syncs ONE Sleeper league id (one season).
@@ -20,11 +14,11 @@ export async function POST(req: Request) {
     if (!leagueId) throw new Error("Missing leagueId");
 
     const league = await getLeague(leagueId);
-    const season = Number(league.season);
+    const season = Number((league as any).season);
 
     // ---------------- USERS ----------------
-    const users = await getLeagueUsers(leagueId);
-    for (const u of users) {
+    const users = await getUsers(leagueId);
+    for (const u of users as any[]) {
       await db.sleeperUser.upsert({
         where: { sleeperUserId: u.user_id },
         update: { displayName: u.display_name, username: u.username },
@@ -33,24 +27,33 @@ export async function POST(req: Request) {
     }
 
     // ---------------- ROSTERS ----------------
-    const rosters = await getLeagueRosters(leagueId);
-    for (const r of rosters) {
+    const rosters = await getRosters(leagueId);
+    for (const r of rosters as any[]) {
       await db.roster.upsert({
         where: {
-          leagueId_season_rosterId: { leagueId, season, rosterId: r.roster_id },
+          leagueId_season_rosterId: {
+            leagueId,
+            season,
+            rosterId: r.roster_id,
+          },
         },
         update: { ownerId: r.owner_id },
-        create: { leagueId, season, rosterId: r.roster_id, ownerId: r.owner_id },
+        create: {
+          leagueId,
+          season,
+          rosterId: r.roster_id,
+          ownerId: r.owner_id,
+        },
       });
     }
 
     // ---------------- MATCHUPS ----------------
     let matchupsUpserted = 0;
     for (let week = 1; week <= 18; week++) {
-      const matchups = await getMatchups(leagueId, week); // <-- FIX
+      const matchups = await getMatchups(leagueId, week);
       if (!matchups?.length) continue;
 
-      for (const m of matchups) {
+      for (const m of matchups as any[]) {
         await db.matchup.upsert({
           where: {
             leagueId_season_week_rosterId: {
@@ -61,7 +64,13 @@ export async function POST(req: Request) {
             },
           },
           update: { points: m.points },
-          create: { leagueId, season, week, rosterId: m.roster_id, points: m.points },
+          create: {
+            leagueId,
+            season,
+            week,
+            rosterId: m.roster_id,
+            points: m.points,
+          },
         });
         matchupsUpserted++;
       }
@@ -73,12 +82,12 @@ export async function POST(req: Request) {
     let assetsCreated = 0;
 
     for (let week = 0; week <= 18; week++) {
-      const txns = await getTransactions(leagueId, week); // <-- FIX
+      const txns = await getTransactions(leagueId, week);
       if (!txns?.length) continue;
 
       transactionsFetched += txns.length;
 
-      for (const t of txns) {
+      for (const t of txns as any[]) {
         await db.transaction.upsert({
           where: { id: t.transaction_id },
           update: {
@@ -101,10 +110,13 @@ export async function POST(req: Request) {
             rawJson: t, // required by your schema
           },
         });
+
         transactionsUpserted++;
 
         // delete old assets for this transaction (so re-sync is clean)
-        await db.transactionAsset.deleteMany({ where: { transactionId: t.transaction_id } });
+        await db.transactionAsset.deleteMany({
+          where: { transactionId: t.transaction_id },
+        });
 
         const movements = buildMovements(t);
 
@@ -124,8 +136,8 @@ export async function POST(req: Request) {
       ok: true,
       leagueId,
       season,
-      users: users.length,
-      rosters: rosters.length,
+      users: (users as any[]).length,
+      rosters: (rosters as any[]).length,
       matchupsUpserted,
       transactionsFetched,
       transactionsUpserted,
@@ -141,7 +153,9 @@ export async function POST(req: Request) {
 
 /**
  * Build TransactionAsset rows from a Sleeper txn.
- * IMPORTANT: for trades, we pair by assetId using adds + drops so from/to are both present.
+ * - Players: from adds/drops pairing (so trades have both sides)
+ * - Picks: from draft_picks
+ * - FAAB: from waiver_budget if present
  */
 function buildMovements(t: any) {
   const adds: Record<string, number> = t.adds ?? {};
@@ -162,7 +176,7 @@ function buildMovements(t: any) {
     });
   }
 
-  // Picks (best source = draft_picks array)
+  // Picks (draft_picks)
   for (const p of draftPicks) {
     const pickSeason = Number(p.season);
     const pickRound = Number(p.round);
@@ -190,7 +204,7 @@ function buildMovements(t: any) {
     });
   }
 
-  // FAAB (optional; if present and shaped like a transfer)
+  // FAAB (optional)
   for (const b of waiverBudget) {
     if (
       typeof b?.from === "number" &&
