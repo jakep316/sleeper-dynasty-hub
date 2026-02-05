@@ -2,27 +2,31 @@ import { PrismaClient } from "@prisma/client";
 import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 
-// Create a single PG pool for the whole app
-const globalForPg = globalThis as unknown as { pgPool?: Pool; prisma?: PrismaClient };
+// IMPORTANT: Prisma 7 requires adapter/accelerateUrl when using engineType "client".
+// We are using adapter-pg + DATABASE_URL (Neon).
+const connectionString = process.env.DATABASE_URL;
+if (!connectionString) {
+  throw new Error("Missing DATABASE_URL");
+}
+
+const globalForPrisma = globalThis as unknown as {
+  prisma?: PrismaClient;
+  pgPool?: Pool;
+};
 
 const pool =
-  globalForPg.pgPool ??
+  globalForPrisma.pgPool ??
   new Pool({
-    connectionString: process.env.DATABASE_URL,
-    // Neon requires SSL. Your URL already has sslmode=require, but this helps ensure it works.
-    ssl: { rejectUnauthorized: false },
+    connectionString,
   });
 
-const adapter = new PrismaPg(pool);
+if (process.env.NODE_ENV !== "production") globalForPrisma.pgPool = pool;
 
 export const db =
-  globalForPg.prisma ??
+  globalForPrisma.prisma ??
   new PrismaClient({
-    adapter,
+    adapter: new PrismaPg(pool),
     log: ["error", "warn"],
   });
 
-if (process.env.NODE_ENV !== "production") {
-  globalForPg.pgPool = pool;
-  globalForPg.prisma = db;
-}
+if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = db;

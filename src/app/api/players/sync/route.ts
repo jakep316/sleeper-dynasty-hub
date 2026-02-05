@@ -2,71 +2,132 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getAllNflPlayers } from "@/lib/sleeper";
 
-function hoursSince(dateMs: number) {
-  return (Date.now() - dateMs) / (1000 * 60 * 60);
+export const dynamic = "force-dynamic";
+
+/**
+ * Find the Prisma delegate that represents your NFL players table/model.
+ * Add candidates here if your Prisma model is named differently.
+ */
+function getPlayerDelegate(prisma: any) {
+  const candidates = [
+    "sleeperPlayer", // model SleeperPlayer
+    "player", // model Player
+    "nflPlayer", // model NflPlayer
+    "sleeperNflPlayer",
+    "SleeperPlayer",
+    "SleeperNflPlayer",
+  ];
+
+  for (const key of candidates) {
+    if (prisma && prisma[key] && typeof prisma[key].upsert === "function") {
+      return prisma[key];
+    }
+  }
+  return null;
 }
 
-async function runWithConcurrency<T>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T, index: number) => Promise<void>
-) {
-  let i = 0;
-  const runners = Array.from({ length: concurrency }, async () => {
-    while (true) {
-      const idx = i++;
-      if (idx >= items.length) return;
-      await worker(items[idx], idx);
-    }
-  });
-  await Promise.all(runners);
+/**
+ * Simple concurrency limiter (no deps).
+ */
+function pLimit(concurrency: number) {
+  let activeCount = 0;
+  const queue: Array<() => void> = [];
+
+  const next = () => {
+    activeCount--;
+    const run = queue.shift();
+    if (run) run();
+  };
+
+  return function limit<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const run = () => {
+        activeCount++;
+        fn()
+          .then(resolve)
+          .catch(reject)
+          .finally(next);
+      };
+
+      if (activeCount < concurrency) run();
+      else queue.push(run);
+    });
+  };
 }
+
+type SleeperNflPlayer = {
+  player_id?: string;
+  full_name?: string;
+  position?: string;
+  team?: string;
+  status?: string;
+};
 
 export async function POST() {
   try {
-    const metaKey = "players_nfl_last_sync_ms";
-    const meta = await db.appMeta.findUnique({ where: { key: metaKey } });
-
-    if (meta?.value) {
-      const last = Number(meta.value);
-      if (Number.isFinite(last) && hoursSince(last) < 24) {
-        return NextResponse.json({ ok: true, skipped: true, reason: "synced_recently" });
-      }
+    const delegate = getPlayerDelegate(db as any);
+    if (!delegate) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Could not find a Prisma model delegate for players. Check prisma/schema.prisma for the Player model name and update candidates list in /api/players/sync.",
+        },
+        { status: 500 }
+      );
     }
 
-    const players = await getAllNflPlayers();
-    const entries = Object.entries(players);
+    // Fetch Sleeper players (big object keyed by player_id)
+    const all = await getAllNflPlayers();
+    const entries = Object.entries(all ?? {}) as Array<[string, SleeperNflPlayer]>;
 
-    // Limit concurrency to avoid hammering DB / timing out
-    const CONCURRENCY = 10;
+    // Build normalized rows
+    const rows = entries.map(([id, p]) => ({
+      id,
+      fullName: p.full_name ?? null,
+      position: p.position ?? null,
+      team: p.team ?? null,
+      status: p.status ?? null,
+    }));
 
-    await runWithConcurrency(entries, CONCURRENCY, async ([id, p]) => {
-      await db.sleeperPlayer.upsert({
-        where: { id },
-        update: {
-          fullName: p?.full_name ?? null,
-          position: p?.position ?? null,
-          team: p?.team ?? null,
-          status: p?.status ?? null,
-        },
-        create: {
-          id,
-          fullName: p?.full_name ?? null,
-          position: p?.position ?? null,
-          team: p?.team ?? null,
-          status: p?.status ?? null,
-        },
-      });
-    });
+    // Upsert in batches with concurrency limit to avoid timeouts
+    const limit = pLimit(20);
+    const BATCH = 500;
 
-    await db.appMeta.upsert({
-      where: { key: metaKey },
-      update: { value: String(Date.now()) },
-      create: { key: metaKey, value: String(Date.now()) },
-    });
+    let upserted = 0;
 
-    return NextResponse.json({ ok: true, count: entries.length });
+    for (let i = 0; i < rows.length; i += BATCH) {
+      const batch = rows.slice(i, i + BATCH);
+
+      await Promise.all(
+        batch.map((r) =>
+          limit(async () => {
+            await delegate.upsert({
+              where: { id: r.id },
+              update: {
+                fullName: r.fullName,
+                position: r.position,
+                team: r.team,
+                status: r.status,
+                updatedAt: new Date(),
+              },
+              create: {
+                id: r.id,
+                fullName: r.fullName,
+                position: r.position,
+                team: r.team,
+                status: r.status,
+                updatedAt: new Date(),
+              },
+            });
+            upserted++;
+          })
+        )
+      );
+    }
+
+    return NextResponse.json({ ok: true, count: upserted });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message ?? "Unknown error" }, { status: 500 });
+    return NextResponse.json({ ok: false, error: e?.message ?? String(e) }, { status: 500 });
   }
 }
