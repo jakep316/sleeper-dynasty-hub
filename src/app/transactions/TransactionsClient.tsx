@@ -2,185 +2,330 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-type TxAsset = {
-  id: string;
-  kind: string;
-  playerId?: string | null;
-  fromRosterId?: number | null;
-  toRosterId?: number | null;
-  pickSeason?: number | null;
-  pickRound?: number | null;
-  faabAmount?: number | null;
+type Option = { value: string; label: string };
+
+type ApiTradeLine = {
+  rosterId: number;
+  team: string;
+  received: string[];
+  sent: string[];
 };
 
-type Tx = {
-  id: string;
-  leagueId: string;
-  season: number;
-  week: number;
-  type: string;
-  createdAt: string;
-  teams: string;
-  moves: string;
-  assets: TxAsset[];
-};
+type ApiItem =
+  | {
+      id: string;
+      leagueId: string;
+      season: number;
+      week: number;
+      type: string;
+      typeLabel: string;
+      date: string;
+      teamsLabel: string;
+      moves: { kind: "trade"; lines: ApiTradeLine[] };
+    }
+  | {
+      id: string;
+      leagueId: string;
+      season: number;
+      week: number;
+      type: string;
+      typeLabel: string;
+      date: string;
+      teamsLabel: string;
+      moves: { kind: "simple"; adds: string[]; drops: string[] };
+    };
 
 type ApiResponse = {
   ok: boolean;
-  items: Tx[];
-  total: number;
   error?: string;
+  rootLeagueId: string;
+  chainLeagueIds: string[];
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  totalPages: number;
+  items: ApiItem[];
 };
 
 type Props = {
-  leagueId: string;
+  rootLeagueId: string;
+  seasons: Option[];
+  types: Option[];
+  teams: Option[];
 };
 
-const PAGE_SIZE = 50;
-
-function prettyType(type: string) {
-  return type
-    .split("_")
-    .filter(Boolean)
-    .map((w) => w[0].toUpperCase() + w.slice(1))
-    .join(" ");
+function cls(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
 }
 
-export default function TransactionsClient({ leagueId }: Props) {
-  const [data, setData] = useState<ApiResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const [season, setSeason] = useState("all");
-  const [team, setTeam] = useState("all");
-  const [type, setType] = useState("all");
-  const [page, setPage] = useState(1);
-
-  useEffect(() => {
-    async function load() {
-      setLoading(true);
-
-      const params = new URLSearchParams();
-      if (season !== "all") params.set("season", season);
-      if (team !== "all") params.set("team", team);
-      if (type !== "all") params.set("type", type);
-      params.set("page", String(page));
-
-      const res = await fetch(`/api/transactions?${params.toString()}`);
-      const json = await res.json();
-
-      setData(json);
-      setLoading(false);
-    }
-
-    load();
-  }, [season, team, type, page]);
-
-  const seasons = useMemo(() => {
-    if (!data?.items) return [];
-    return [...new Set(data.items.map((t) => t.season))].sort((a, b) => b - a);
-  }, [data]);
-
-  const types = useMemo(() => {
-    if (!data?.items) return [];
-    return [...new Set(data.items.map((t) => t.type))].sort();
-  }, [data]);
-
-  const teams = useMemo(() => {
-    if (!data?.items) return [];
-    return [...new Set(data.items.map((t) => t.teams))].sort();
-  }, [data]);
-
+function Pager({
+  page,
+  totalPages,
+  loading,
+  onPrev,
+  onNext,
+}: {
+  page: number;
+  totalPages: number;
+  loading: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
   return (
-    <div className="space-y-6">
-      {/* Filters */}
-      <div className="flex flex-wrap gap-3 rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
-        <select
-          value={season}
-          onChange={(e) => {
-            setSeason(e.target.value);
-            setPage(1);
-          }}
-          className="rounded-xl border px-3 py-2"
-        >
-          <option value="all">All Seasons</option>
-          {seasons.map((s) => (
-            <option key={s}>{s}</option>
-          ))}
-        </select>
-
-        <select
-          value={team}
-          onChange={(e) => {
-            setTeam(e.target.value);
-            setPage(1);
-          }}
-          className="rounded-xl border px-3 py-2"
-        >
-          <option value="all">All Teams</option>
-          {teams.map((t) => (
-            <option key={t}>{t}</option>
-          ))}
-        </select>
-
-        <select
-          value={type}
-          onChange={(e) => {
-            setType(e.target.value);
-            setPage(1);
-          }}
-          className="rounded-xl border px-3 py-2"
-        >
-          <option value="all">All Types</option>
-          {types.map((t) => (
-            <option key={t}>{prettyType(t)}</option>
-          ))}
-        </select>
+    <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm text-sm text-zinc-600 flex flex-wrap gap-3 items-center justify-between">
+      <div>
+        Page <span className="font-semibold text-zinc-900">{page}</span> of{" "}
+        <span className="font-semibold text-zinc-900">{totalPages}</span>
       </div>
 
-      {/* Pagination Top */}
-      <Pager page={page} setPage={setPage} total={data?.total ?? 0} />
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={onPrev}
+          disabled={page <= 1 || loading}
+          className={cls(
+            "rounded-xl px-3 py-2 font-semibold",
+            page <= 1 || loading
+              ? "text-zinc-400 border border-zinc-200"
+              : "text-zinc-900 border border-zinc-200 hover:bg-zinc-50"
+          )}
+        >
+          ← Prev
+        </button>
+
+        <button
+          type="button"
+          onClick={onNext}
+          disabled={page >= totalPages || loading}
+          className={cls(
+            "rounded-xl px-3 py-2 font-semibold",
+            page >= totalPages || loading
+              ? "text-zinc-400 border border-zinc-200"
+              : "text-zinc-900 border border-zinc-200 hover:bg-zinc-50"
+          )}
+        >
+          Next →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export default function TransactionsClient({ rootLeagueId, seasons, types, teams }: Props) {
+  const [selectedSeasons, setSelectedSeasons] = useState<string[]>([]);
+  const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
+  const [selectedTeams, setSelectedTeams] = useState<string[]>([]);
+
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<ApiResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  // reset to page 1 on filter change
+  useEffect(() => {
+    setPage(1);
+  }, [selectedSeasons.join(","), selectedTypes.join(","), selectedTeams.join(",")]);
+
+  const query = useMemo(() => {
+    const sp = new URLSearchParams();
+    sp.set("rootLeagueId", rootLeagueId);
+    sp.set("page", String(page));
+    sp.set("pageSize", "50");
+
+    if (selectedSeasons.length) sp.set("seasons", selectedSeasons.join(","));
+    if (selectedTypes.length) sp.set("types", selectedTypes.join(","));
+    if (selectedTeams.length) sp.set("teams", selectedTeams.join(","));
+
+    return sp.toString();
+  }, [rootLeagueId, page, selectedSeasons, selectedTypes, selectedTeams]);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/transactions?${query}`, { cache: "no-store" });
+      const json = (await res.json()) as ApiResponse;
+      setData(json);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
+
+  function toggle(list: string[], v: string) {
+    return list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
+  }
+
+  function resetAll() {
+    setSelectedSeasons([]);
+    setSelectedTypes([]);
+    setSelectedTeams([]);
+    setPage(1);
+  }
+
+  const total = data?.totalCount ?? 0;
+  const totalPages = data?.totalPages ?? 1;
+  const items = data?.items ?? [];
+
+  const onPrev = () => setPage((p) => Math.max(1, p - 1));
+  const onNext = () => setPage((p) => Math.min(totalPages, p + 1));
+
+  return (
+    <main className="mx-auto max-w-6xl p-6 space-y-6">
+      <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold">Transactions</h1>
+            <p className="mt-1 text-sm text-zinc-600">
+              {loading ? (
+                <span>Loading…</span>
+              ) : (
+                <>
+                  Showing <span className="font-semibold text-zinc-900">{items.length}</span> rows •{" "}
+                  <span className="font-semibold text-zinc-900">{total}</span> total
+                </>
+              )}
+            </p>
+          </div>
+
+          <button
+            onClick={resetAll}
+            className="rounded-xl px-4 py-2 text-sm font-semibold border border-zinc-200 hover:bg-zinc-50"
+            type="button"
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div className="grid gap-4 md:grid-cols-3">
+        <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+          <div className="text-sm font-semibold mb-2">Seasons</div>
+          <div className="max-h-56 overflow-auto space-y-2">
+            {seasons.map((o) => (
+              <label key={o.value} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={selectedSeasons.includes(o.value)}
+                  onChange={() => setSelectedSeasons((s) => toggle(s, o.value))}
+                />
+                <span>{o.label}</span>
+              </label>
+            ))}
+            {seasons.length === 0 && <div className="text-sm text-zinc-500">No seasons found.</div>}
+          </div>
+        </div>
+
+        <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+          <div className="text-sm font-semibold mb-2">Types</div>
+          <div className="max-h-56 overflow-auto space-y-2">
+            {types.map((o) => (
+              <label key={o.value} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={selectedTypes.includes(o.value)}
+                  onChange={() => setSelectedTypes((s) => toggle(s, o.value))}
+                />
+                <span>{o.label}</span>
+              </label>
+            ))}
+            {types.length === 0 && <div className="text-sm text-zinc-500">No types found.</div>}
+          </div>
+        </div>
+
+        <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+          <div className="text-sm font-semibold mb-2">Teams</div>
+          <div className="max-h-56 overflow-auto space-y-2">
+            {teams.map((o) => (
+              <label key={o.value} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={selectedTeams.includes(o.value)}
+                  onChange={() => setSelectedTeams((s) => toggle(s, o.value))}
+                />
+                <span>{o.label}</span>
+              </label>
+            ))}
+            {teams.length === 0 && <div className="text-sm text-zinc-500">No teams found.</div>}
+          </div>
+        </div>
+      </div>
+
+      {/* Pager (TOP) */}
+      <Pager page={page} totalPages={totalPages} loading={loading} onPrev={onPrev} onNext={onNext} />
 
       {/* Table */}
       <div className="rounded-3xl border border-zinc-200 bg-white shadow-sm overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-zinc-50 text-zinc-600">
             <tr>
-              <th className="p-3 text-left">Season</th>
-              <th className="p-3 text-left">Week</th>
-              <th className="p-3 text-left">Date</th>
-              <th className="p-3 text-left">Type</th>
-              <th className="p-3 text-left">Teams</th>
-              <th className="p-3 text-left">Moves</th>
+              <th className="text-left p-3">Season</th>
+              <th className="text-left p-3">Week</th>
+              <th className="text-left p-3">Date</th>
+              <th className="text-left p-3">Type</th>
+              <th className="text-left p-3">Teams</th>
+              <th className="text-left p-3">Moves</th>
             </tr>
           </thead>
 
           <tbody>
-            {loading && (
+            {items.map((t) => (
+              <tr key={t.id} className="border-t align-top">
+                <td className="p-3 whitespace-nowrap">{t.season}</td>
+                <td className="p-3 whitespace-nowrap">{t.week}</td>
+                <td className="p-3 whitespace-nowrap">{new Date(t.date).toLocaleDateString()}</td>
+                <td className="p-3 whitespace-nowrap">{t.typeLabel}</td>
+                <td className="p-3 whitespace-nowrap">{t.teamsLabel}</td>
+                <td className="p-3">
+                  {t.moves.kind === "simple" ? (
+                    <div className="space-y-1">
+                      {t.moves.adds.length > 0 && (
+                        <div className="text-emerald-700">Added: {t.moves.adds.join(", ")}</div>
+                      )}
+                      {t.moves.drops.length > 0 && (
+                        <div className="text-rose-700">Dropped: {t.moves.drops.join(", ")}</div>
+                      )}
+                      {t.moves.adds.length === 0 && t.moves.drops.length === 0 && (
+                        <span className="text-zinc-400">—</span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {t.moves.lines.map((line) => (
+                        <div key={line.rosterId} className="leading-snug">
+                          <div className="font-semibold text-zinc-900">{line.team}</div>
+                          <div className="text-zinc-700">
+                            <span className="font-semibold">Received:</span>{" "}
+                            {line.received.length ? line.received.join(", ") : "—"}
+                          </div>
+                          <div className="text-zinc-700">
+                            <span className="font-semibold">Sent:</span>{" "}
+                            {line.sent.length ? line.sent.join(", ") : "—"}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </td>
+              </tr>
+            ))}
+
+            {!loading && items.length === 0 && (
               <tr>
-                <td colSpan={6} className="p-6 text-zinc-500">
-                  Loading…
+                <td className="p-6 text-zinc-600" colSpan={6}>
+                  No transactions match those filters.
                 </td>
               </tr>
             )}
-
-            {data?.items?.map((t) => (
-              <tr key={t.id} className="border-t align-top">
-                <td className="p-3">{t.season}</td>
-                <td className="p-3">{t.week}</td>
-                <td className="p-3">
-                  {new Date(t.createdAt).toLocaleDateString()}
-                </td>
-                <td className="p-3">{prettyType(t.type)}</td>
-                <td className="p-3">{t.teams}</td>
-                <td className="p-3 whitespace-pre-wrap">{t.moves}</td>
-              </tr>
-            ))}
           </tbody>
         </table>
       </div>
 
-      {/* Pagination Bottom */}
-      <Pager page={page} setPage={setPage} total={data?.total ?? 0} />
+      {/* Pager (BOTTOM) */}
+      <Pager page={page} totalPages={totalPages} loading={loading} onPrev={onPrev} onNext={onNext} />
 
       {/* Error */}
       {data?.ok === false && (
@@ -188,44 +333,6 @@ export default function TransactionsClient({ leagueId }: Props) {
           {data.error ?? "Unknown error"}
         </div>
       )}
-    </div>
-  );
-}
-
-/* ----------------------------- Pager ----------------------------- */
-
-function Pager({
-  page,
-  setPage,
-  total,
-}: {
-  page: number;
-  setPage: (p: number) => void;
-  total: number;
-}) {
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-
-  return (
-    <div className="flex items-center justify-between rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm shadow-sm">
-      <button
-        disabled={page <= 1}
-        onClick={() => setPage(page - 1)}
-        className="rounded-xl border px-3 py-1 disabled:opacity-40"
-      >
-        ← Prev
-      </button>
-
-      <span>
-        Page {page} / {totalPages}
-      </span>
-
-      <button
-        disabled={page >= totalPages}
-        onClick={() => setPage(page + 1)}
-        className="rounded-xl border px-3 py-1 disabled:opacity-40"
-      >
-        Next →
-      </button>
-    </div>
+    </main>
   );
 }

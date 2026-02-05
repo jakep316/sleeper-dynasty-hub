@@ -1,7 +1,9 @@
-import { db } from "@/lib/db";
 import TransactionsClient from "./TransactionsClient";
+import { db } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
+
+type Option = { value: string; label: string };
 
 function prettyType(type: string) {
   return type
@@ -13,56 +15,48 @@ function prettyType(type: string) {
 
 export default async function TransactionsPage() {
   const rootLeagueId = process.env.SLEEPER_LEAGUE_ID!;
-  if (!rootLeagueId) throw new Error("Missing SLEEPER_LEAGUE_ID env var");
+  if (!rootLeagueId) {
+    return (
+      <main className="mx-auto max-w-4xl p-6">
+        <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+          Missing <code className="font-mono">SLEEPER_LEAGUE_ID</code> env var.
+        </div>
+      </main>
+    );
+  }
 
-  // Seasons + types from whatever is already in DB (across all chain IDs will be handled in API)
-  const [seasonRows, typeRows] = await Promise.all([
-    db.transaction.findMany({
-      distinct: ["season"],
-      select: { season: true },
-      orderBy: { season: "desc" },
-    }),
-    db.transaction.findMany({
-      distinct: ["type"],
-      select: { type: true },
-    }),
-  ]);
+  // These dropdown options are "starter lists".
+  // The real results come from /api/transactions using the league chain.
+  const seasonRows = await db.transaction.findMany({
+    distinct: ["season"],
+    select: { season: true },
+    orderBy: { season: "desc" },
+  });
 
-  const seasons = seasonRows.map((s) => ({
-    value: String(s.season),
-    label: String(s.season),
-  }));
+  const typeRows = await db.transaction.findMany({
+    distinct: ["type"],
+    select: { type: true },
+  });
 
-  const types = typeRows
-    .map((t) => t.type)
-    .filter((x): x is string => !!x)
-    .sort()
-    .map((t) => ({ value: t, label: prettyType(t) }));
+  // Team options: use current season rosters if available; fallback to roster 1-20
+  const latestSeason = seasonRows[0]?.season ?? new Date().getFullYear();
 
-  // Teams: use the most recent season we have rosters for the root league (fallback safe)
-  const newestSeason = seasonRows[0]?.season ?? new Date().getFullYear();
-
-  const rosters = await db.roster.findMany({
-    where: { leagueId: rootLeagueId, season: newestSeason },
-    select: { rosterId: true, ownerId: true },
+  const rosterRows = await db.roster.findMany({
+    where: { leagueId: rootLeagueId, season: latestSeason },
+    select: { rosterId: true },
     orderBy: { rosterId: "asc" },
   });
 
-  const ownerIds = Array.from(new Set(rosters.map((r) => r.ownerId).filter(Boolean))) as string[];
-  const owners =
-    ownerIds.length > 0
-      ? await db.sleeperUser.findMany({
-          where: { sleeperUserId: { in: ownerIds } },
-          select: { sleeperUserId: true, displayName: true, username: true },
-        })
-      : [];
+  const seasons: Option[] = seasonRows.map((s) => ({ value: String(s.season), label: String(s.season) }));
 
-  const ownerMap = new Map(owners.map((o) => [o.sleeperUserId, o.displayName ?? o.username]));
+  const types: Option[] = (typeRows.map((t) => t.type).filter(Boolean) as string[])
+    .sort()
+    .map((t) => ({ value: t, label: prettyType(t) }));
 
-  const teams = rosters.map((r) => ({
-    value: String(r.rosterId),
-    label: (r.ownerId && ownerMap.get(r.ownerId)) || `Roster ${r.rosterId}`,
-  }));
+  const teams: Option[] =
+    rosterRows.length > 0
+      ? rosterRows.map((r) => ({ value: String(r.rosterId), label: `Roster ${r.rosterId}` }))
+      : Array.from({ length: 20 }, (_, i) => ({ value: String(i + 1), label: `Roster ${i + 1}` }));
 
   return <TransactionsClient rootLeagueId={rootLeagueId} seasons={seasons} types={types} teams={teams} />;
 }
