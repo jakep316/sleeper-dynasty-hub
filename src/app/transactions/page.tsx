@@ -25,7 +25,6 @@ function buildQueryString(params: Record<string, string | number | null | undefi
 }
 
 function prettyType(type: string) {
-  // "free_agent" -> "Free Agent"
   return type
     .split("_")
     .filter(Boolean)
@@ -37,10 +36,6 @@ function uniq<T>(arr: T[]) {
   return Array.from(new Set(arr));
 }
 
-/**
- * Normalize labels like "mattyal, herzy07" vs "herzy07, mattyal"
- * so they become consistent and don't show up as two "different" teams.
- */
 function normalizeTeamLabel(label: string) {
   const parts = label
     .split(",")
@@ -59,7 +54,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
   const typeParam = searchParams?.type ?? "all";
   const page = Math.max(1, Number(searchParams?.page ?? 1));
 
-  // ---- Filters ----
   const where: any = { leagueId };
   if (seasonParam !== "all") where.season = Number(seasonParam);
   if (typeParam !== "all") where.type = typeParam;
@@ -69,7 +63,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
     where.assets = { some: { OR: [{ fromRosterId: teamId }, { toRosterId: teamId }] } };
   }
 
-  // ---- Dropdown data ----
   const [seasonRows, typeRows] = await Promise.all([
     db.transaction.findMany({
       where: { leagueId },
@@ -87,7 +80,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
   const seasons = seasonRows.map((s) => s.season);
   const types = (typeRows.map((t) => t.type).filter(Boolean) as string[]).sort();
 
-  // ---- Pull transactions ----
   const [totalCount, transactions] = await Promise.all([
     db.transaction.count({ where }),
     db.transaction.findMany({
@@ -96,14 +88,24 @@ export default async function TransactionsPage({ searchParams }: Props) {
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
       include: { assets: true },
+      select: {
+        id: true,
+        leagueId: true,
+        season: true,
+        week: true,
+        type: true,
+        status: true,
+        createdAt: true,
+        rawJson: true, // <-- needed for "whose pick"
+        assets: true,
+      } as any,
     }),
   ]);
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
-  // ---- Build roster -> owner label map for any (leagueId, season) on this page ----
   const leagueSeasonPairs = Array.from(
-    new Set(transactions.map((t) => `${t.leagueId}::${t.season}`))
+    new Set(transactions.map((t: any) => `${t.leagueId}::${t.season}`))
   ).map((k) => {
     const [lid, s] = k.split("::");
     return { leagueId: lid, season: Number(s) };
@@ -112,9 +114,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
   const rosterRows =
     leagueSeasonPairs.length > 0
       ? await db.roster.findMany({
-          where: {
-            OR: leagueSeasonPairs.map((p) => ({ leagueId: p.leagueId, season: p.season })),
-          },
+          where: { OR: leagueSeasonPairs.map((p) => ({ leagueId: p.leagueId, season: p.season })) },
           select: { leagueId: true, season: true, rosterId: true, ownerId: true },
         })
       : [];
@@ -142,12 +142,11 @@ export default async function TransactionsPage({ searchParams }: Props) {
     return rosterLabelMap.get(`${lid}::${season}::${rosterId}`) ?? `Roster ${rosterId}`;
   };
 
-  // ---- Player map for page ----
   const playerIds = uniq(
     transactions
-      .flatMap((t) => t.assets)
-      .map((a) => a.playerId)
-      .filter((x): x is string => typeof x === "string" && x.length > 0)
+      .flatMap((t: any) => t.assets)
+      .map((a: any) => a.playerId)
+      .filter((x: any): x is string => typeof x === "string" && x.length > 0)
   );
 
   const players =
@@ -168,20 +167,56 @@ export default async function TransactionsPage({ searchParams }: Props) {
     return parts.length ? `${name} (${parts.join(", ")})` : name;
   };
 
-  const pickLabel = (a: any) => {
+  function pickLabelFromRawJson(t: any, a: any) {
     const ys = typeof a.pickSeason === "number" ? String(a.pickSeason) : "?";
     const rd = typeof a.pickRound === "number" ? String(a.pickRound) : "?";
-    return `${ys} R${rd}`;
-  };
+    const base = `${ys} R${rd}`;
 
-  const assetLabel = (a: any) => {
-    if (a.kind === "pick") return pickLabel(a);
+    const raw = t?.rawJson as any;
+    const picks = Array.isArray(raw?.draft_picks) ? raw.draft_picks : [];
+
+    // try to find the exact pick movement record
+    const match = picks.find((p: any) => {
+      const seasonOk = Number(p.season) === Number(a.pickSeason);
+      const roundOk = Number(p.round) === Number(a.pickRound);
+
+      const toOk =
+        a.toRosterId == null ||
+        p.owner_id == null ||
+        Number(p.owner_id) === Number(a.toRosterId) ||
+        Number(p.roster_id) === Number(a.toRosterId);
+
+      const fromOk =
+        a.fromRosterId == null ||
+        p.previous_owner_id == null ||
+        Number(p.previous_owner_id) === Number(a.fromRosterId) ||
+        Number(p.previous_owner_roster_id) === Number(a.fromRosterId);
+
+      return seasonOk && roundOk && toOk && fromOk;
+    });
+
+    const original =
+      typeof match?.original_owner_id === "number"
+        ? match.original_owner_id
+        : typeof match?.original_owner_roster_id === "number"
+          ? match.original_owner_roster_id
+          : null;
+
+    if (typeof original === "number") {
+      const who = rosterLabel(t.leagueId, t.season, original);
+      return `${base} (${who} pick)`;
+    }
+
+    return base;
+  }
+
+  const assetLabel = (t: any, a: any) => {
+    if (a.kind === "pick") return pickLabelFromRawJson(t, a);
     if (a.kind === "faab") return `FAAB $${a.faabAmount ?? 0}`;
     if (a.playerId) return playerLabel(a.playerId);
     return a.kind ?? "asset";
   };
 
-  // ---- Team dropdown options (current selected season or newest) ----
   const seasonForRosterDropdown =
     seasonParam !== "all" ? Number(seasonParam) : seasons[0] ?? new Date().getFullYear();
 
@@ -199,8 +234,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
         }))
       : Array.from({ length: 20 }, (_, i) => ({ id: i + 1, label: `Roster ${i + 1}` }));
 
-  // ---- Column renderers ----
-
   function getTeamsString(t: any) {
     if (t.type === "trade") {
       const involvedIds = uniq(
@@ -210,9 +243,8 @@ export default async function TransactionsPage({ searchParams }: Props) {
       ) as number[];
 
       const labels = involvedIds
-        .map((rid) => rosterLabel(t.leagueId, t.season, rid))
-        .filter((x) => x !== "—")
-        .map(normalizeTeamLabel);
+        .map((rid) => normalizeTeamLabel(rosterLabel(t.leagueId, t.season, rid)))
+        .filter((x) => x !== "—");
 
       const clean = uniq(labels);
 
@@ -221,22 +253,19 @@ export default async function TransactionsPage({ searchParams }: Props) {
       return clean[0] ?? "—";
     }
 
-    // Non-trade: show the team(s) involved
     const ids = uniq(
       t.assets
         .flatMap((a: any) => [a.fromRosterId, a.toRosterId])
         .filter((x: any) => typeof x === "number")
     ) as number[];
 
-    const labels = uniq(
-      ids.map((rid) => normalizeTeamLabel(rosterLabel(t.leagueId, t.season, rid)))
-    ).filter((x) => x !== "—");
+    const labels = uniq(ids.map((rid) => normalizeTeamLabel(rosterLabel(t.leagueId, t.season, rid))))
+      .filter((x) => x !== "—");
 
     return labels.length ? labels.join(", ") : "—";
   }
 
   function getMoves(t: any) {
-    // TRADES: show Sent + Received per team (players + picks + FAAB)
     if (t.type === "trade") {
       const received = new Map<number, string[]>();
       const sent = new Map<number, string[]>();
@@ -246,7 +275,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
         const to = a.toRosterId;
 
         if (typeof from === "number" && typeof to === "number" && from !== to) {
-          const label = assetLabel(a);
+          const label = assetLabel(t, a);
 
           const sList = sent.get(from) ?? [];
           sList.push(label);
@@ -259,7 +288,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
       }
 
       const teamIds = uniq([...sent.keys(), ...received.keys()]).sort((a, b) => a - b);
-
       if (teamIds.length === 0) return <span className="text-zinc-400">—</span>;
 
       return (
@@ -299,7 +327,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
       );
     }
 
-    // NON-TRADES: show Added/Dropped (players only)
     const adds: string[] = [];
     const drops: string[] = [];
 
@@ -390,7 +417,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
           </thead>
 
           <tbody>
-            {transactions.map((t) => (
+            {transactions.map((t: any) => (
               <tr key={t.id} className="border-t align-top">
                 <td className="p-3 whitespace-nowrap">{t.season}</td>
                 <td className="p-3 whitespace-nowrap">{t.week}</td>
