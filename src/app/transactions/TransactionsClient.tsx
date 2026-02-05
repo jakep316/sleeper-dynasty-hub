@@ -61,7 +61,6 @@ function clamp(n: number, lo: number, hi: number) {
 }
 
 export default function TransactionsClient({ leagueId }: { leagueId: string }) {
-  // URL-driven state (so refresh/share links work)
   const initial = useMemo(() => {
     const sp = new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
     return {
@@ -80,7 +79,6 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Build query string + keep URL in sync
   const qs = useMemo(() => {
     const sp = new URLSearchParams();
     sp.set("leagueId", leagueId);
@@ -100,13 +98,11 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
   }, [leagueId, selectedSeasons, selectedTypes, selectedTeams, page]);
 
   useEffect(() => {
-    // Update URL without navigation
     const url = new URL(window.location.href);
     url.search = qs;
     window.history.replaceState({}, "", url.toString());
   }, [qs]);
 
-  // Fetch when query changes
   useEffect(() => {
     let cancelled = false;
 
@@ -129,7 +125,6 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
     };
   }, [qs]);
 
-  // Whenever filters change, go back to page 1
   useEffect(() => {
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -137,7 +132,6 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
 
   const facets = data && data.ok ? data.facets : null;
 
-  // Strip roster numbers from labels if they ever sneak in (extra safety)
   const teamFacetClean = useMemo(() => {
     if (!facets) return [];
     return facets.teams.map((t) => ({
@@ -152,6 +146,40 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
   }
 
   const totalPages = data && data.ok ? data.totalPages : 1;
+
+  function renderMoves(t: TxItem) {
+    // Trades: ONLY show "received" blocks to avoid duplication
+    if (t.type === "trade") {
+      if (!t.received?.length) return <span className="text-zinc-400">—</span>;
+      return (
+        <div className="space-y-2">
+          {t.received.map((r) => (
+            <div key={`recv-${t.id}-${r.rosterId}`} className="leading-snug">
+              <div className="font-semibold text-zinc-900">{r.team} received</div>
+              <div className="text-zinc-700">{r.items.join(", ")}</div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // Non-trades: show Added / Dropped (not received/sent)
+    const addedBlocks = t.received ?? [];
+    const droppedBlocks = t.sent ?? [];
+
+    // Most non-trade txns are single-team; just flatten items
+    const added = addedBlocks.flatMap((b) => b.items);
+    const dropped = droppedBlocks.flatMap((b) => b.items);
+
+    if (!added.length && !dropped.length) return <span className="text-zinc-400">—</span>;
+
+    return (
+      <div className="space-y-1">
+        {added.length > 0 && <div className="text-emerald-700">Added: {added.join(", ")}</div>}
+        {dropped.length > 0 && <div className="text-rose-700">Dropped: {dropped.join(", ")}</div>}
+      </div>
+    );
+  }
 
   return (
     <main className="mx-auto max-w-6xl p-6 space-y-6">
@@ -179,7 +207,6 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
       {/* Filters */}
       <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {/* Seasons */}
           <div>
             <div className="text-sm font-semibold text-zinc-900 mb-2">Seasons</div>
             <div className="max-h-48 overflow-auto rounded-2xl border border-zinc-200 p-3 space-y-2">
@@ -197,7 +224,6 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
             </div>
           </div>
 
-          {/* Types */}
           <div>
             <div className="text-sm font-semibold text-zinc-900 mb-2">Types</div>
             <div className="max-h-48 overflow-auto rounded-2xl border border-zinc-200 p-3 space-y-2">
@@ -215,7 +241,6 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
             </div>
           </div>
 
-          {/* Teams */}
           <div>
             <div className="text-sm font-semibold text-zinc-900 mb-2">Teams</div>
             <div className="max-h-48 overflow-auto rounded-2xl border border-zinc-200 p-3 space-y-2">
@@ -264,14 +289,12 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
         </div>
       </div>
 
-      {/* Error */}
       {data?.ok === false && (
         <div className="rounded-3xl border border-rose-200 bg-rose-50 p-5 text-rose-800">
           {data.error}
         </div>
       )}
 
-      {/* Table */}
       <div className="rounded-3xl border border-zinc-200 bg-white shadow-sm overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-zinc-50 text-zinc-600">
@@ -298,35 +321,7 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
                   <td className="p-3 whitespace-nowrap">
                     {t.teams && t.teams.length ? t.teams.join(" ↔ ") : "—"}
                   </td>
-                  <td className="p-3">
-                    <div className="space-y-2">
-                      {t.received?.length > 0 && (
-                        <div className="space-y-1">
-                          {t.received.map((r) => (
-                            <div key={`r-${t.id}-${r.rosterId}`}>
-                              <div className="font-semibold text-zinc-900">{r.team} received</div>
-                              <div className="text-zinc-700">{r.items.join(", ")}</div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {t.sent?.length > 0 && (
-                        <div className="space-y-1">
-                          {t.sent.map((s) => (
-                            <div key={`s-${t.id}-${s.rosterId}`}>
-                              <div className="font-semibold text-zinc-900">{s.team} sent</div>
-                              <div className="text-zinc-700">{s.items.join(", ")}</div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {(!t.received?.length && !t.sent?.length) && (
-                        <span className="text-zinc-400">—</span>
-                      )}
-                    </div>
-                  </td>
+                  <td className="p-3">{renderMoves(t)}</td>
                 </tr>
               ))}
 
@@ -341,7 +336,7 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
         </table>
       </div>
 
-      {/* Pagination top+bottom */}
+      {/* Pagination */}
       <div className="flex items-center justify-between">
         <button
           className={`rounded-xl px-3 py-2 font-semibold ${
