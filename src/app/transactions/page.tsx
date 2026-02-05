@@ -72,7 +72,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
   const seasons = seasonRows.map((s) => s.season);
   const types = (typeRows.map((t) => t.type).filter(Boolean) as string[]).sort();
 
-  // ---- Pull transactions (NO select + include together!) ----
+  // ---- Pull transactions ----
   const [totalCount, transactions] = await Promise.all([
     db.transaction.count({ where }),
     db.transaction.findMany({
@@ -80,7 +80,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
       orderBy: [{ season: "desc" }, { week: "desc" }, { createdAt: "desc" }],
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
-      include: { assets: true }, // ✅ keep include
+      include: { assets: true },
     }),
   ]);
 
@@ -153,25 +153,16 @@ export default async function TransactionsPage({ searchParams }: Props) {
     return parts.length ? `${name} (${parts.join(", ")})` : name;
   };
 
-  // ---- Pick label helpers ----
   function pickLabel(t: any, a: any) {
     const ys = typeof a.pickSeason === "number" ? String(a.pickSeason) : "?";
     const rd = typeof a.pickRound === "number" ? String(a.pickRound) : "?";
 
-    // Try to determine "whose pick" from rawJson.draft_picks if present
     const raw = t.rawJson as any;
     const dp = Array.isArray(raw?.draft_picks) ? raw.draft_picks : [];
 
-    // Match by season+round and by to/from roster if possible
     const match =
-      dp.find((p: any) => {
-        const sameSeason = String(p?.season) === ys;
-        const sameRound = Number(p?.round) === Number(rd);
-        return sameSeason && sameRound;
-      }) ?? null;
+      dp.find((p: any) => String(p?.season) === ys && Number(p?.round) === Number(rd)) ?? null;
 
-    // Sleeper draft_picks includes original_owner_id sometimes; otherwise owner_id
-    // These are rosterIds in many payloads.
     const original =
       match?.original_owner_id ??
       match?.original_owner_roster_id ??
@@ -179,7 +170,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
       null;
 
     const label = original ? rosterLabel(t.leagueId, t.season, Number(original)) : null;
-
     return label ? `${ys} R${rd} (${label} pick)` : `${ys} R${rd}`;
   }
 
@@ -190,7 +180,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
     return a.kind ?? "asset";
   };
 
-  // ---- Team dropdown options (current selected season or newest) ----
+  // ---- Team dropdown options ----
   const seasonForRosterDropdown =
     seasonParam !== "all" ? Number(seasonParam) : seasons[0] ?? new Date().getFullYear();
 
@@ -216,7 +206,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
         if (typeof a.fromRosterId === "number") involved.push(a.fromRosterId);
         if (typeof a.toRosterId === "number") involved.push(a.toRosterId);
       }
-
       const clean = uniq(involved)
         .map((rid) => rosterLabel(t.leagueId, t.season, rid))
         .filter((x) => x !== "—");
@@ -245,30 +234,50 @@ export default async function TransactionsPage({ searchParams }: Props) {
   function getMoves(t: any) {
     if (t.type === "trade") {
       const received = new Map<number, string[]>();
+      const sent = new Map<number, string[]>();
+      const involved = new Set<number>();
 
       for (const a of t.assets) {
-        const from = a.fromRosterId;
-        const to = a.toRosterId;
+        const from = typeof a.fromRosterId === "number" ? a.fromRosterId : null;
+        const to = typeof a.toRosterId === "number" ? a.toRosterId : null;
 
-        if (typeof from === "number" && typeof to === "number" && from !== to) {
+        const label = assetLabel(t, a);
+
+        if (from !== null) {
+          involved.add(from);
+          const list = sent.get(from) ?? [];
+          list.push(label);
+          sent.set(from, list);
+        }
+
+        if (to !== null) {
+          involved.add(to);
           const list = received.get(to) ?? [];
-          list.push(assetLabel(t, a));
+          list.push(label);
           received.set(to, list);
         }
       }
 
-      const teamIds = Array.from(received.keys()).sort((a, b) => a - b);
+      const teamIds = Array.from(involved).sort((a, b) => a - b);
       if (teamIds.length === 0) return <span className="text-zinc-400">—</span>;
 
       return (
-        <div className="space-y-2">
+        <div className="space-y-3">
           {teamIds.map((rid) => {
             const team = rosterLabel(t.leagueId, t.season, rid);
-            const items = received.get(rid) ?? [];
+            const got = received.get(rid) ?? [];
+            const gave = sent.get(rid) ?? [];
             return (
               <div key={rid} className="leading-snug">
-                <div className="font-semibold text-zinc-900">{team} received</div>
-                <div className="text-zinc-700">{items.join(", ")}</div>
+                <div className="font-semibold text-zinc-900">{team}</div>
+                <div className="text-zinc-700">
+                  <span className="font-semibold">Received:</span>{" "}
+                  {got.length ? got.join(", ") : "—"}
+                </div>
+                <div className="text-zinc-700">
+                  <span className="font-semibold">Sent:</span>{" "}
+                  {gave.length ? gave.join(", ") : "—"}
+                </div>
               </div>
             );
           })}
@@ -276,6 +285,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
       );
     }
 
+    // Non-trades: Added/Dropped
     const adds: string[] = [];
     const drops: string[] = [];
 

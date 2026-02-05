@@ -107,13 +107,12 @@ export async function POST(req: Request) {
             type: t.type,
             status: t.status,
             createdAt: new Date(t.created),
-            rawJson: t, // required by your schema
+            rawJson: t,
           },
         });
 
         transactionsUpserted++;
 
-        // delete old assets for this transaction (so re-sync is clean)
         await db.transactionAsset.deleteMany({
           where: { transactionId: t.transaction_id },
         });
@@ -151,15 +150,21 @@ export async function POST(req: Request) {
   }
 }
 
+function toInt(v: any): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 /**
  * Build TransactionAsset rows from a Sleeper txn.
  * - Players: from adds/drops pairing (so trades have both sides)
- * - Picks: from draft_picks
+ * - Picks: from draft_picks (coerce ids robustly)
  * - FAAB: from waiver_budget if present
  */
 function buildMovements(t: any) {
-  const adds: Record<string, number> = t.adds ?? {};
-  const drops: Record<string, number> = t.drops ?? {};
+  const adds: Record<string, any> = t.adds ?? {};
+  const drops: Record<string, any> = t.drops ?? {};
   const draftPicks: any[] = Array.isArray(t.draft_picks) ? t.draft_picks : [];
   const waiverBudget: any[] = Array.isArray(t.waiver_budget) ? t.waiver_budget : [];
 
@@ -171,34 +176,32 @@ function buildMovements(t: any) {
     movements.push({
       kind: "player",
       playerId: id,
-      fromRosterId: typeof drops[id] === "number" ? drops[id] : null,
-      toRosterId: typeof adds[id] === "number" ? adds[id] : null,
+      fromRosterId: toInt(drops[id]),
+      toRosterId: toInt(adds[id]),
     });
   }
 
-  // Picks (draft_picks)
+  // Picks (draft_picks) - robust parsing for older seasons
   for (const p of draftPicks) {
-    const pickSeason = Number(p.season);
-    const pickRound = Number(p.round);
+    const pickSeason = toInt(p.season);
+    const pickRound = toInt(p.round);
 
-    const toRosterId =
-      typeof p.owner_id === "number"
-        ? p.owner_id
-        : typeof p.roster_id === "number"
-          ? p.roster_id
-          : null;
-
-    const fromRosterId =
-      typeof p.previous_owner_id === "number"
-        ? p.previous_owner_id
-        : typeof p.previous_owner_roster_id === "number"
-          ? p.previous_owner_roster_id
-          : null;
+    // "owner_id" / "previous_owner_id" are usually rosterIds but may be strings; sometimes other keys exist
+    const toRosterId = toInt(
+      p.owner_id ?? p.roster_id ?? p.owner_roster_id ?? p.ownerRosterId ?? null
+    );
+    const fromRosterId = toInt(
+      p.previous_owner_id ??
+        p.previous_owner_roster_id ??
+        p.previousOwnerId ??
+        p.previousOwnerRosterId ??
+        null
+    );
 
     movements.push({
       kind: "pick",
-      pickSeason: Number.isFinite(pickSeason) ? pickSeason : null,
-      pickRound: Number.isFinite(pickRound) ? pickRound : null,
+      pickSeason,
+      pickRound,
       fromRosterId,
       toRosterId,
     });
@@ -206,16 +209,16 @@ function buildMovements(t: any) {
 
   // FAAB (optional)
   for (const b of waiverBudget) {
-    if (
-      typeof b?.from === "number" &&
-      typeof b?.to === "number" &&
-      typeof b?.amount === "number"
-    ) {
+    const from = toInt(b?.from);
+    const to = toInt(b?.to);
+    const amount = toInt(b?.amount);
+
+    if (from !== null && to !== null && amount !== null) {
       movements.push({
         kind: "faab",
-        faabAmount: b.amount,
-        fromRosterId: b.from,
-        toRosterId: b.to,
+        faabAmount: amount,
+        fromRosterId: from,
+        toRosterId: to,
       });
     }
   }
