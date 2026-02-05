@@ -48,8 +48,7 @@ function csvToArray(v: string | null) {
 /**
  * IMPORTANT FIX:
  * Even if LeagueSeason exists, it might have previousLeagueId null/incorrect.
- * We always consult Sleeper if the chain would otherwise stop.
- * Also we upsert/fix LeagueSeason rows while walking.
+ * We consult Sleeper if the chain would otherwise stop and upsert while walking.
  */
 async function getLeagueChain(rootLeagueId: string) {
   const leagueIds: string[] = [];
@@ -61,21 +60,18 @@ async function getLeagueChain(rootLeagueId: string) {
   while (cur && guard++ < 20) {
     leagueIds.push(cur);
 
-    // 1) Try DB row
+    // Try DB row first
     let row: LeagueSeasonRow | null = await db.leagueSeason.findFirst({
       where: { leagueId: cur },
       select: { leagueId: true, season: true, previousLeagueId: true },
     });
 
-    // 2) Always fetch from Sleeper if:
-    //    - row missing OR
-    //    - row exists but previousLeagueId is null (chain would stop) OR
-    //    - row exists but season is not finite
+    // If missing OR would stop chain OR season not finite, consult Sleeper
     const needsSleeper =
       !row || row.previousLeagueId === null || !Number.isFinite(Number(row.season));
 
     if (needsSleeper) {
-      const l = await getLeague(cur); // source of truth
+      const l = await getLeague(cur);
       const season = Number((l as any)?.season);
       const prev = ((l as any)?.previous_league_id ?? null) as string | null;
 
@@ -87,10 +83,13 @@ async function getLeagueChain(rootLeagueId: string) {
         });
         row = { leagueId: cur, season, previousLeagueId: prev };
       } else {
-        // If Sleeper didn't give a season (unlikely), still continue chain using prev.
+        // Even if season is weird, we can still continue the chain via prev.
         row = { leagueId: cur, season: NaN as any, previousLeagueId: prev };
       }
     }
+
+    // TS-safe: row can still theoretically be null (extremely rare), so guard it.
+    if (!row) break;
 
     if (Number.isFinite(Number(row.season))) {
       seasonToLeagueId.set(Number(row.season), row.leagueId);
@@ -187,7 +186,6 @@ export async function GET(req: Request) {
 
     const facetTeams: Facet[] = teamRosters.map((r) => ({
       value: String(r.rosterId),
-      // you said no roster numbers in the filter label
       label: (rosterIdToRootLabel.get(r.rosterId) || `Roster ${r.rosterId}`).trim(),
     }));
 
@@ -277,7 +275,6 @@ export async function GET(req: Request) {
       return parts.length ? `${name} (${parts.join(", ")})` : name;
     };
 
-    // Pick label: use rawJson.draft_picks[*].roster_id (whose pick slot)
     function pickLabel(t: any, a: any) {
       const ys = typeof a.pickSeason === "number" ? a.pickSeason : null;
       const rd = typeof a.pickRound === "number" ? a.pickRound : null;
@@ -294,7 +291,6 @@ export async function GET(req: Request) {
         if (!Number.isFinite(ps) || !Number.isFinite(pr)) return false;
         if (ys !== null && ps !== ys) return false;
         if (rd !== null && pr !== rd) return false;
-
         const prev = p?.previous_owner_id;
         const owner = p?.owner_id;
         if (typeof a.fromRosterId === "number" && typeof a.toRosterId === "number") {
@@ -330,7 +326,6 @@ export async function GET(req: Request) {
         .map((rid) => rosterLabel(t.leagueId, t.season, rid))
         .filter((x) => x !== "—");
 
-      // TRADE
       if (t.type === "trade") {
         const recvMap = new Map<number, string[]>();
         const sentMap = new Map<number, string[]>();
@@ -378,11 +373,9 @@ export async function GET(req: Request) {
         };
       }
 
-      // NON-TRADE (free_agent / waiver / commissioner etc.)
       const addedMap = new Map<number, { items: string[]; faab?: number }>();
       const droppedMap = new Map<number, string[]>();
 
-      // FAAB bid is usually on rawJson.settings.waiver_bid
       const waiverBidRaw = Number(t.rawJson?.settings?.waiver_bid);
       const waiverBid = Number.isFinite(waiverBidRaw) && waiverBidRaw > 0 ? waiverBidRaw : undefined;
 
@@ -390,7 +383,6 @@ export async function GET(req: Request) {
         const from = a.fromRosterId;
         const to = a.toRosterId;
 
-        // adds (FA/waiver signings)
         if ((from === null || from === undefined) && typeof to === "number") {
           const entry = addedMap.get(to) ?? { items: [], faab: undefined };
           entry.items.push(assetLabel(t, a));
@@ -398,7 +390,6 @@ export async function GET(req: Request) {
           addedMap.set(to, entry);
         }
 
-        // drops
         if ((to === null || to === undefined) && typeof from === "number") {
           const list = droppedMap.get(from) ?? [];
           list.push(assetLabel(t, a));
