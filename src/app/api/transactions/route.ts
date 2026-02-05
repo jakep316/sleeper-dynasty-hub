@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { getLeague } from "@/lib/sleeper";
 
 type Facet = { value: string; label: string };
+type LeagueSeasonRow = { leagueId: string; season: number; previousLeagueId: string | null };
 
 type TxItem = {
   id: string;
@@ -13,18 +14,16 @@ type TxItem = {
   typeLabel: string;
   createdAt: string;
 
-  teams: string[]; // unique teams involved (labels)
+  teams: string[];
 
-  // For trades: per-team received/sent
+  // Trades
   received: { rosterId: number; team: string; items: string[] }[];
   sent: { rosterId: number; team: string; items: string[] }[];
 
-  // For non-trades: show Added/Dropped (and optional FAAB)
+  // Non-trades
   added?: { rosterId: number; team: string; items: string[]; faab?: number }[];
   dropped?: { rosterId: number; team: string; items: string[] }[];
 };
-
-type LeagueSeasonRow = { leagueId: string; season: number; previousLeagueId: string | null };
 
 function uniq<T>(arr: T[]) {
   return Array.from(new Set(arr));
@@ -46,7 +45,12 @@ function csvToArray(v: string | null) {
     .filter(Boolean);
 }
 
-// Build chain from DB first; if missing, fall back to Sleeper API and persist into LeagueSeason
+/**
+ * IMPORTANT FIX:
+ * Even if LeagueSeason exists, it might have previousLeagueId null/incorrect.
+ * We always consult Sleeper if the chain would otherwise stop.
+ * Also we upsert/fix LeagueSeason rows while walking.
+ */
 async function getLeagueChain(rootLeagueId: string) {
   const leagueIds: string[] = [];
   const seasonToLeagueId = new Map<number, string>();
@@ -57,15 +61,21 @@ async function getLeagueChain(rootLeagueId: string) {
   while (cur && guard++ < 20) {
     leagueIds.push(cur);
 
-    // 1) try DB
+    // 1) Try DB row
     let row: LeagueSeasonRow | null = await db.leagueSeason.findFirst({
       where: { leagueId: cur },
       select: { leagueId: true, season: true, previousLeagueId: true },
     });
 
-    // 2) if missing, fetch from Sleeper and upsert
-    if (!row) {
-      const l = await getLeague(cur); // { league_id, season, previous_league_id }
+    // 2) Always fetch from Sleeper if:
+    //    - row missing OR
+    //    - row exists but previousLeagueId is null (chain would stop) OR
+    //    - row exists but season is not finite
+    const needsSleeper =
+      !row || row.previousLeagueId === null || !Number.isFinite(Number(row.season));
+
+    if (needsSleeper) {
+      const l = await getLeague(cur); // source of truth
       const season = Number((l as any)?.season);
       const prev = ((l as any)?.previous_league_id ?? null) as string | null;
 
@@ -75,14 +85,17 @@ async function getLeagueChain(rootLeagueId: string) {
           update: { previousLeagueId: prev },
           create: { leagueId: cur, season, previousLeagueId: prev },
         });
-
         row = { leagueId: cur, season, previousLeagueId: prev };
       } else {
+        // If Sleeper didn't give a season (unlikely), still continue chain using prev.
         row = { leagueId: cur, season: NaN as any, previousLeagueId: prev };
       }
     }
 
-    if (Number.isFinite(row.season)) seasonToLeagueId.set(row.season, row.leagueId);
+    if (Number.isFinite(Number(row.season))) {
+      seasonToLeagueId.set(Number(row.season), row.leagueId);
+    }
+
     cur = row.previousLeagueId ?? null;
   }
 
@@ -102,6 +115,7 @@ export async function GET(req: Request) {
       .filter((n) => Number.isFinite(n));
 
     const typesFilter = csvToArray(url.searchParams.get("type"));
+
     const teamsFilter = csvToArray(url.searchParams.get("team"))
       .map((s) => Number(s))
       .filter((n) => Number.isFinite(n));
@@ -118,7 +132,7 @@ export async function GET(req: Request) {
       };
     }
 
-    // ---- facets across chain ----
+    // Facets across ALL leagues in chain
     const [seasonRows, typeRows] = await Promise.all([
       db.transaction.findMany({
         where: { leagueId: { in: leagues } },
@@ -142,11 +156,10 @@ export async function GET(req: Request) {
       .sort()
       .map((t) => ({ value: t, label: prettyType(t) }));
 
-    // pick a "teamsSeason" for team facet labels (newest season in data)
     const teamsSeason =
       facetSeasons.length > 0 ? Number(facetSeasons[0].value) : new Date().getFullYear();
 
-    // team facet: rosters in rootLeagueId + teamsSeason
+    // Team facet labels (newest season in root league)
     const teamRosters = await db.roster.findMany({
       where: { leagueId: rootLeagueId, season: teamsSeason },
       select: { rosterId: true, ownerId: true },
@@ -174,11 +187,10 @@ export async function GET(req: Request) {
 
     const facetTeams: Facet[] = teamRosters.map((r) => ({
       value: String(r.rosterId),
-      // no roster numbers in UI
+      // you said no roster numbers in the filter label
       label: (rosterIdToRootLabel.get(r.rosterId) || `Roster ${r.rosterId}`).trim(),
     }));
 
-    // ---- fetch page rows (need rawJson for pick original owner lookup) ----
     const [total, rows] = await Promise.all([
       db.transaction.count({ where }),
       db.transaction.findMany({
@@ -190,7 +202,6 @@ export async function GET(req: Request) {
           id: true,
           leagueId: true,
           season: true,
-          week: true,
           type: true,
           createdAt: true,
           rawJson: true,
@@ -201,7 +212,7 @@ export async function GET(req: Request) {
 
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
-    // ---- roster labels for any (leagueId, season) on page ----
+    // Roster labels for any (leagueId, season) in page
     const leagueSeasonPairs = uniq(rows.map((t) => `${t.leagueId}::${t.season}`)).map((k) => {
       const [lid, s] = k.split("::");
       return { leagueId: lid, season: Number(s) };
@@ -243,10 +254,10 @@ export async function GET(req: Request) {
       );
     };
 
-    // ---- player map for page ----
+    // Player map for page
     const playerIds = uniq(
-      rows.flatMap((t) => t.assets).map((a) => a.playerId).filter((x): x is string => !!x)
-    );
+      rows.flatMap((t: any) => t.assets).map((a: any) => a.playerId).filter((x: any) => !!x)
+    ) as string[];
 
     const players =
       playerIds.length > 0
@@ -266,7 +277,7 @@ export async function GET(req: Request) {
       return parts.length ? `${name} (${parts.join(", ")})` : name;
     };
 
-    // For picks, label with “(ORIGINAL TEAM pick)” using rawJson.draft_picks[*].roster_id (the pick slot)
+    // Pick label: use rawJson.draft_picks[*].roster_id (whose pick slot)
     function pickLabel(t: any, a: any) {
       const ys = typeof a.pickSeason === "number" ? a.pickSeason : null;
       const rd = typeof a.pickRound === "number" ? a.pickRound : null;
@@ -277,7 +288,6 @@ export async function GET(req: Request) {
 
       const draftPicks: any[] = Array.isArray(t.rawJson?.draft_picks) ? t.rawJson.draft_picks : [];
 
-      // Find matching draft pick object
       const match = draftPicks.find((p) => {
         const ps = Number(p?.season);
         const pr = Number(p?.round);
@@ -285,20 +295,15 @@ export async function GET(req: Request) {
         if (ys !== null && ps !== ys) return false;
         if (rd !== null && pr !== rd) return false;
 
-        // For trades, also match by movement if possible
         const prev = p?.previous_owner_id;
         const owner = p?.owner_id;
         if (typeof a.fromRosterId === "number" && typeof a.toRosterId === "number") {
           if (prev === a.fromRosterId && owner === a.toRosterId) return true;
         }
-        // Otherwise accept season+round match
         return true;
       });
 
-      // Sleeper uses roster_id to indicate whose pick slot it is
-      const originalRoster =
-        typeof match?.roster_id === "number" ? (match.roster_id as number) : null;
-
+      const originalRoster = typeof match?.roster_id === "number" ? (match.roster_id as number) : null;
       const originalTeam =
         originalRoster !== null ? rosterLabel(lidForNames, seasonForNames, originalRoster) : null;
 
@@ -374,31 +379,22 @@ export async function GET(req: Request) {
       }
 
       // NON-TRADE (free_agent / waiver / commissioner etc.)
-      const addedMap = new Map<number, { items: string[]; faab: number }>();
+      const addedMap = new Map<number, { items: string[]; faab?: number }>();
       const droppedMap = new Map<number, string[]>();
 
-      // build FAAB map from rawJson.waiver_budget if present (Sleeper includes this on waivers)
-      const wb: Record<string, any> =
-        t.rawJson && typeof t.rawJson === "object" && t.rawJson.waiver_budget
-          ? t.rawJson.waiver_budget
-          : {};
-
-      const faabByRoster = new Map<number, number>();
-      for (const [k, v] of Object.entries(wb)) {
-        const rid = Number(k);
-        const amt = Number(v);
-        if (Number.isFinite(rid) && Number.isFinite(amt)) faabByRoster.set(rid, amt);
-      }
+      // FAAB bid is usually on rawJson.settings.waiver_bid
+      const waiverBidRaw = Number(t.rawJson?.settings?.waiver_bid);
+      const waiverBid = Number.isFinite(waiverBidRaw) && waiverBidRaw > 0 ? waiverBidRaw : undefined;
 
       for (const a of t.assets) {
         const from = a.fromRosterId;
         const to = a.toRosterId;
 
-        // adds
+        // adds (FA/waiver signings)
         if ((from === null || from === undefined) && typeof to === "number") {
-          const entry = addedMap.get(to) ?? { items: [], faab: faabByRoster.get(to) ?? 0 };
+          const entry = addedMap.get(to) ?? { items: [], faab: undefined };
           entry.items.push(assetLabel(t, a));
-          entry.faab = faabByRoster.get(to) ?? entry.faab;
+          if (t.type === "waiver" && waiverBid !== undefined) entry.faab = waiverBid;
           addedMap.set(to, entry);
         }
 
@@ -415,7 +411,7 @@ export async function GET(req: Request) {
           rosterId: rid,
           team: rosterLabel(t.leagueId, t.season, rid),
           items: entry.items,
-          faab: entry.faab && entry.faab > 0 ? entry.faab : undefined,
+          faab: entry.faab,
         }))
         .sort((a, b) => a.rosterId - b.rosterId);
 

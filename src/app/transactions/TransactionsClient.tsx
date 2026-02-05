@@ -41,7 +41,13 @@ type ApiResp = {
 type PlayerSearchResp = {
   ok: boolean;
   q: string;
-  results: { id: string; fullName: string | null; position: string | null; team: string | null; status: string | null }[];
+  results: {
+    id: string;
+    fullName: string | null;
+    position: string | null;
+    team: string | null;
+    status: string | null;
+  }[];
   error?: string;
 };
 
@@ -64,7 +70,6 @@ function fmtDate(iso: string) {
 }
 
 export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: string }) {
-  // multi-select filters
   const [seasonSel, setSeasonSel] = React.useState<string[]>([]);
   const [typeSel, setTypeSel] = React.useState<string[]>([]);
   const [teamSel, setTeamSel] = React.useState<string[]>([]);
@@ -83,20 +88,15 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
   const [playerResults, setPlayerResults] = React.useState<PlayerSearchResp["results"]>([]);
   const [playerErr, setPlayerErr] = React.useState<string | null>(null);
 
-  // ---- load transactions ----
   const load = React.useCallback(async () => {
     setLoading(true);
     setErr(null);
     try {
-      const season = seasonSel.join(",");
-      const type = typeSel.join(",");
-      const team = teamSel.join(",");
-
       const qs = buildQuery({
         leagueId: rootLeagueId,
-        season,
-        type,
-        team,
+        season: seasonSel.join(","),
+        type: typeSel.join(","),
+        team: teamSel.join(","),
         page,
         pageSize,
       });
@@ -128,7 +128,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seasonSel.join(","), typeSel.join(","), teamSel.join(",")]);
 
-  // ---- player autocomplete (>= 3 chars) ----
+  // Player autocomplete (>= 3 chars)
   React.useEffect(() => {
     let alive = true;
 
@@ -145,6 +145,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
         const res = await fetch(`/api/players/search${buildQuery({ q })}`, { cache: "no-store" });
         const json = (await res.json()) as PlayerSearchResp;
         if (!alive) return;
+
         if (!json.ok) {
           setPlayerErr(json.error ?? "Search failed.");
           setPlayerResults([]);
@@ -179,19 +180,13 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
     setPlayerResults([]);
   }
 
-  // client-side filter by player: hide transactions that don’t include that player id
-  // We do NOT fetch by player server-side (keeps API simple).
+  // client-side filter by player query (hide non-matching rows on current page)
   const filteredItems = React.useMemo(() => {
     if (!data?.items) return [];
     const q = playerQ.trim().toLowerCase();
     if (q.length < 3) return data.items;
-
-    // If they selected a suggestion, we'll store the exact name in input; still filter by substring on rendered strings
-    // (good enough UX; we can upgrade to id-based filtering later if you want)
-    return data.items.filter((t) => {
-      const hay = JSON.stringify(t).toLowerCase();
-      return hay.includes(q);
-    });
+    const needle = q;
+    return data.items.filter((t) => JSON.stringify(t).toLowerCase().includes(needle));
   }, [data?.items, playerQ]);
 
   const totalPages = data?.totalPages ?? 1;
@@ -203,12 +198,10 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
       }`}
     >
       <div>
-        Showing{" "}
-        <span className="font-semibold text-zinc-900">
-          {filteredItems.length}
-        </span>{" "}
+        Showing <span className="font-semibold text-zinc-900">{filteredItems.length}</span>
         {data ? (
           <>
+            {" "}
             of <span className="font-semibold text-zinc-900">{data.total}</span>
           </>
         ) : null}
@@ -243,6 +236,45 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
     </div>
   );
 
+  const CheckList = ({
+    title,
+    items,
+    selected,
+    onToggle,
+  }: {
+    title: string;
+    items: Facet[];
+    selected: string[];
+    onToggle: (v: string) => void;
+  }) => (
+    <div className="space-y-2">
+      <div className="text-sm font-semibold text-zinc-900">{title}</div>
+      <div className="max-h-48 overflow-auto rounded-2xl border border-zinc-200 bg-white p-2">
+        {items.length === 0 ? (
+          <div className="p-2 text-sm text-zinc-500">None</div>
+        ) : (
+          <ul className="space-y-1">
+            {items.map((it) => (
+              <li key={it.value}>
+                <label className="flex items-center gap-2 rounded-xl px-2 py-1 hover:bg-zinc-50 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={selected.includes(it.value)}
+                    onChange={() => onToggle(it.value)}
+                  />
+                  <span className="text-sm text-zinc-900">{it.label}</span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {selected.length > 0 && (
+        <div className="text-xs text-zinc-500">Selected: {selected.length}</div>
+      )}
+    </div>
+  );
+
   return (
     <main className="mx-auto max-w-6xl p-6 space-y-6">
       <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
@@ -273,68 +305,24 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
       {/* Filters */}
       <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm space-y-4">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          {/* Seasons */}
-          <div className="space-y-2">
-            <div className="text-sm font-semibold text-zinc-900">Seasons</div>
-            <div className="flex flex-wrap gap-2">
-              {(data?.facets?.seasons ?? []).map((s) => (
-                <button
-                  key={s.value}
-                  onClick={() => toggle(seasonSel, s.value, setSeasonSel)}
-                  className={`rounded-2xl px-3 py-2 text-sm font-semibold border ${
-                    seasonSel.includes(s.value)
-                      ? "border-zinc-900 bg-zinc-900 text-white"
-                      : "border-zinc-200 bg-white text-zinc-900 hover:bg-zinc-50"
-                  }`}
-                >
-                  {s.label}
-                </button>
-              ))}
-              {(!data?.facets?.seasons || data.facets.seasons.length === 0) && (
-                <div className="text-sm text-zinc-500">No seasons loaded yet.</div>
-              )}
-            </div>
-          </div>
-
-          {/* Types */}
-          <div className="space-y-2">
-            <div className="text-sm font-semibold text-zinc-900">Types</div>
-            <div className="flex flex-wrap gap-2">
-              {(data?.facets?.types ?? []).map((t) => (
-                <button
-                  key={t.value}
-                  onClick={() => toggle(typeSel, t.value, setTypeSel)}
-                  className={`rounded-2xl px-3 py-2 text-sm font-semibold border ${
-                    typeSel.includes(t.value)
-                      ? "border-zinc-900 bg-zinc-900 text-white"
-                      : "border-zinc-200 bg-white text-zinc-900 hover:bg-zinc-50"
-                  }`}
-                >
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Teams */}
-          <div className="space-y-2">
-            <div className="text-sm font-semibold text-zinc-900">Teams</div>
-            <div className="flex flex-wrap gap-2">
-              {(data?.facets?.teams ?? []).map((t) => (
-                <button
-                  key={t.value}
-                  onClick={() => toggle(teamSel, t.value, setTeamSel)}
-                  className={`rounded-2xl px-3 py-2 text-sm font-semibold border ${
-                    teamSel.includes(t.value)
-                      ? "border-zinc-900 bg-zinc-900 text-white"
-                      : "border-zinc-200 bg-white text-zinc-900 hover:bg-zinc-50"
-                  }`}
-                >
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          </div>
+          <CheckList
+            title="Seasons"
+            items={data?.facets?.seasons ?? []}
+            selected={seasonSel}
+            onToggle={(v) => toggle(seasonSel, v, setSeasonSel)}
+          />
+          <CheckList
+            title="Types"
+            items={data?.facets?.types ?? []}
+            selected={typeSel}
+            onToggle={(v) => toggle(typeSel, v, setTypeSel)}
+          />
+          <CheckList
+            title="Teams"
+            items={data?.facets?.teams ?? []}
+            selected={teamSel}
+            onToggle={(v) => toggle(teamSel, v, setTeamSel)}
+          />
         </div>
 
         {/* Player search */}
@@ -355,14 +343,8 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
 
             {playerOpen && playerQ.trim().length >= 3 && (
               <div className="absolute z-20 mt-2 w-full overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-lg">
-                {playerLoading && (
-                  <div className="p-3 text-sm text-zinc-600">Searching…</div>
-                )}
-
-                {playerErr && (
-                  <div className="p-3 text-sm text-rose-700">{playerErr}</div>
-                )}
-
+                {playerLoading && <div className="p-3 text-sm text-zinc-600">Searching…</div>}
+                {playerErr && <div className="p-3 text-sm text-rose-700">{playerErr}</div>}
                 {!playerLoading && !playerErr && playerResults.length === 0 && (
                   <div className="p-3 text-sm text-zinc-600">No matches.</div>
                 )}
@@ -394,28 +376,24 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
           </div>
 
           <div className="mt-2 text-xs text-zinc-500">
-            Tip: This hides non-matching rows on the current page. (We can upgrade to server-side player filtering later.)
+            Filters current page rows (client-side). We can do true server-side player filtering later.
           </div>
         </div>
       </div>
 
-      {/* Errors / loading */}
       {err && (
         <div className="rounded-3xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
           {err}
         </div>
       )}
-
       {loading && (
         <div className="rounded-3xl border border-zinc-200 bg-white p-4 text-sm text-zinc-600">
           Loading…
         </div>
       )}
 
-      {/* Pager (top) */}
       <Pager />
 
-      {/* Table */}
       <div className="rounded-3xl border border-zinc-200 bg-white shadow-sm overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-zinc-50 text-zinc-600">
@@ -436,7 +414,6 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
                 <td className="p-3 whitespace-nowrap">{t.typeLabel}</td>
                 <td className="p-3 whitespace-nowrap">{t.teams.join(" ↔ ") || "—"}</td>
                 <td className="p-3">
-                  {/* Trade */}
                   {t.type === "trade" ? (
                     <div className="space-y-2">
                       {t.received.map((r) => (
@@ -447,7 +424,6 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
                       ))}
                     </div>
                   ) : (
-                    // Non-trade: Added/Dropped (+ FAAB)
                     <div className="space-y-2">
                       {t.added && t.added.length > 0 && (
                         <div className="space-y-1">
@@ -497,7 +473,6 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
         </table>
       </div>
 
-      {/* Pager (bottom) */}
       <Pager className="mb-8" />
     </main>
   );
