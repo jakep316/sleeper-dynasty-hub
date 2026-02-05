@@ -69,23 +69,17 @@ function fmtDate(iso: string) {
   }
 }
 
-// Render pick label with drafted player part italic + grey
-// Expected format from API:
-//   "2022 R1 (Kshoe89 pick • David Montgomery (RB, DET))"
-// or "2028 R1 (Kshoe89 pick)"
+// "2025 R1 (Brigantix7x pick Emeka Egbuka)"
+// -> italicize "Emeka Egbuka" in grey
 function renderMaybeDraftedPick(text: string) {
-  const idx = text.indexOf(" pick • ");
-  if (idx === -1) return <>{text}</>;
-
-  // split inside parens, but simplest: split on " pick • "
-  const before = text.slice(0, idx + " pick".length); // includes " pick"
-  const after = text.slice(idx + " pick • ".length);
-
+  const m = text.match(/^(.*\(\s*[^)]+ pick)\s+(.+)\)$/);
+  if (!m) return <>{text}</>;
+  const left = m[1];
+  const player = m[2];
   return (
     <>
-      {before}
-      {" • "}
-      <span className="italic text-zinc-500">{after}</span>
+      {left} <span className="italic text-zinc-500">{player}</span>
+      {")"}
     </>
   );
 }
@@ -104,7 +98,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
 
   // Player search
   const [playerQ, setPlayerQ] = React.useState("");
-  const [playerId, setPlayerId] = React.useState<string | null>(null); // NEW: server-side filter key
+  const [playerId, setPlayerId] = React.useState<string | null>(null);
   const [playerOpen, setPlayerOpen] = React.useState(false);
   const [playerLoading, setPlayerLoading] = React.useState(false);
   const [playerResults, setPlayerResults] = React.useState<PlayerSearchResp["results"]>([]);
@@ -145,13 +139,11 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
     load();
   }, [load]);
 
-  // reset to page 1 when filters change (including playerId)
   React.useEffect(() => {
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seasonSel.join(","), typeSel.join(","), teamSel.join(","), playerId ?? ""]);
 
-  // Player autocomplete (>= 3 chars)
   React.useEffect(() => {
     let alive = true;
 
@@ -317,7 +309,6 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
         </div>
       </div>
 
-      {/* Filters */}
       <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm space-y-4">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <CheckList
@@ -340,7 +331,6 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
           />
         </div>
 
-        {/* Player search */}
         <div className="pt-2">
           <div className="text-sm font-semibold text-zinc-900">Player search</div>
           <div className="relative mt-2 max-w-xl">
@@ -350,8 +340,6 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
                 const v = e.target.value;
                 setPlayerQ(v);
                 setPlayerOpen(true);
-
-                // IMPORTANT: typing changes invalidates the selected player id
                 setPlayerId(null);
               }}
               onFocus={() => setPlayerOpen(true)}
@@ -380,7 +368,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={() => {
                           setPlayerQ(name);
-                          setPlayerId(p.id); // NEW: drives server-side filtering
+                          setPlayerId(p.id);
                           setPlayerOpen(false);
                         }}
                       >

@@ -277,14 +277,14 @@ export async function GET(req: Request) {
 
     const pagePlayerMap = new Map(pagePlayers.map((p) => [p.id, p]));
 
-    const playerLabelFromRow = (p: { fullName: string | null; position: string | null; team: string | null } | null | undefined, fallbackId: string) => {
-      if (!p) return `Player ${fallbackId}`;
-      const name = p.fullName ?? `Player ${fallbackId}`;
+    // Full player label for player assets in transactions (keep POS/TEAM here)
+    const playerLabel = (id: string) => {
+      const p = pagePlayerMap.get(id);
+      if (!p) return `Player ${id}`;
+      const name = p.fullName ?? `Player ${id}`;
       const parts = [p.position, p.team].filter(Boolean);
       return parts.length ? `${name} (${parts.join(", ")})` : name;
     };
-
-    const playerLabel = (id: string) => playerLabelFromRow(pagePlayerMap.get(id) ?? null, id);
 
     // ---- Draft pick "used on" lookup (request-level cache) ----
     // key: `${leagueId}::${season}::${rosterId}::${round}` -> playerId
@@ -300,7 +300,6 @@ export async function GET(req: Request) {
         const drafts = await getLeagueDrafts(leagueIdForSeason);
         const seasonStr = String(season);
 
-        // completed drafts for that season
         const candidates = (drafts || []).filter((d) => {
           const ds = d?.season == null ? "" : String(d.season);
           const okSeason = ds === seasonStr;
@@ -308,7 +307,6 @@ export async function GET(req: Request) {
           return okSeason && okStatus;
         });
 
-        // prefer rookie if available; otherwise first completed
         const preferred =
           candidates.find((d) => (d.type ?? "").toLowerCase().includes("rookie")) ?? candidates[0];
 
@@ -347,25 +345,25 @@ export async function GET(req: Request) {
       await loadDraftSlotMapFor(lid, season);
     }
 
-    // NEW: load drafted player name rows (so drafted player labels show properly)
+    // Load drafted player rows so drafted player NAME shows reliably
     const draftedIds = uniq(
-      Array.from(draftedPlayerIdBySlot.values()).filter((x): x is string => typeof x === "string" && x.length > 0)
+      Array.from(draftedPlayerIdBySlot.values()).filter(
+        (x): x is string => typeof x === "string" && x.length > 0
+      )
     );
 
     const draftedPlayers =
       draftedIds.length > 0
         ? await db.sleeperPlayer.findMany({
             where: { id: { in: draftedIds } },
-            select: { id: true, fullName: true, position: true, team: true },
+            select: { id: true, fullName: true },
           })
         : [];
 
-    const draftedPlayerMap = new Map(draftedPlayers.map((p) => [p.id, p]));
+    const draftedPlayerNameMap = new Map(draftedPlayers.map((p) => [p.id, p.fullName ?? p.id]));
 
-    const draftedPlayerLabel = (id: string) => {
-      const row = draftedPlayerMap.get(id) ?? pagePlayerMap.get(id) ?? null;
-      return playerLabelFromRow(row, id);
-    };
+    // Drafted player label for inside the pick parentheses: JUST the name (no pos/team)
+    const draftedPlayerNameOnly = (id: string) => draftedPlayerNameMap.get(id) ?? id;
 
     function pickLabel(t: any, a: any) {
       const ys = typeof a.pickSeason === "number" ? a.pickSeason : null;
@@ -377,7 +375,6 @@ export async function GET(req: Request) {
 
       const draftPicks: any[] = Array.isArray(t.rawJson?.draft_picks) ? t.rawJson.draft_picks : [];
 
-      // Find matching draft_picks row so we can identify ORIGINAL roster slot (roster_id)
       const match = draftPicks.find((p) => {
         const ps = Number(p?.season);
         const pr = Number(p?.round);
@@ -399,20 +396,17 @@ export async function GET(req: Request) {
       const originalTeam =
         originalRoster !== null ? rosterLabel(lidForNames, seasonForNames, originalRoster) : null;
 
-      // Drafted player (if draft happened and we can map it)
-      let drafted: string | null = null;
+      let draftedName: string | null = null;
       if (ys !== null && rd !== null && originalRoster !== null) {
         const key = `${lidForNames}::${ys}::${originalRoster}::${rd}`;
         const pid = draftedPlayerIdBySlot.get(key);
-        if (pid) drafted = draftedPlayerLabel(pid);
+        if (pid) draftedName = draftedPlayerNameOnly(pid);
       }
 
-      // IMPORTANT: format core first (NO prefix),
-      // e.g. "2024 R1 (Mattyice3188 pick David Montgomery (RB, DET))"
       const core = `${ys ?? "?"} R${rd ?? "?"}`;
       if (!originalTeam) return core;
 
-      const extra = drafted ? ` ${drafted}` : "";
+      const extra = draftedName ? ` ${draftedName}` : "";
       return `${core} (${originalTeam} pick${extra})`;
     }
 
@@ -484,7 +478,6 @@ export async function GET(req: Request) {
       const addedMap = new Map<number, { items: string[]; faab?: number }>();
       const droppedMap = new Map<number, string[]>();
 
-      // Waiver FAAB:
       const wb1 = Number(t.rawJson?.settings?.waiver_budget);
       const wb2 = Number(t.rawJson?.settings?.waiver_bid);
       const waiverBid =
