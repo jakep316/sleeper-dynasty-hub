@@ -2,6 +2,8 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 
+type Facet = { value: string; label: string };
+
 type TxOut = {
   id: string;
   leagueId: string;
@@ -13,6 +15,12 @@ type TxOut = {
   teams: string[];
   received: { rosterId: number; team: string; items: string[] }[];
   sent: { rosterId: number; team: string; items: string[] }[];
+};
+
+type LeagueSeasonRow = {
+  leagueId: string;
+  season: number;
+  previousLeagueId: string | null;
 };
 
 function csvToArray(v: string | null) {
@@ -45,7 +53,7 @@ async function getLeagueChainFromDb(rootLeagueId: string) {
   while (cur && guard++ < 20) {
     leagueIds.push(cur);
 
-    const row = await db.leagueSeason.findFirst({
+    const row: LeagueSeasonRow | null = await db.leagueSeason.findFirst({
       where: { leagueId: cur },
       select: { leagueId: true, season: true, previousLeagueId: true },
     });
@@ -62,9 +70,16 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
 
     const rootLeagueId = url.searchParams.get("leagueId") || process.env.SLEEPER_LEAGUE_ID!;
-    const seasonsFilter = csvToArray(url.searchParams.get("season")).map((s) => Number(s)).filter(Number.isFinite);
+
+    const seasonsFilter = csvToArray(url.searchParams.get("season"))
+      .map((s) => Number(s))
+      .filter((n) => Number.isFinite(n));
+
     const typesFilter = csvToArray(url.searchParams.get("type"));
-    const teamsFilter = csvToArray(url.searchParams.get("team")).map((s) => Number(s)).filter(Number.isFinite);
+
+    const teamsFilter = csvToArray(url.searchParams.get("team"))
+      .map((s) => Number(s))
+      .filter((n) => Number.isFinite(n));
 
     const page = Math.max(1, Number(url.searchParams.get("page") ?? "1"));
     const pageSize = Math.max(1, Math.min(100, Number(url.searchParams.get("pageSize") ?? "50")));
@@ -74,7 +89,6 @@ export async function GET(req: Request) {
     // If DB chain table isn't populated, fall back to only root
     const leagues = leagueIds.length ? leagueIds : [rootLeagueId];
 
-    // WHERE
     const where: any = {
       leagueId: { in: leagues },
     };
@@ -85,10 +99,7 @@ export async function GET(req: Request) {
     if (teamsFilter.length) {
       where.assets = {
         some: {
-          OR: [
-            { fromRosterId: { in: teamsFilter } },
-            { toRosterId: { in: teamsFilter } },
-          ],
+          OR: [{ fromRosterId: { in: teamsFilter } }, { toRosterId: { in: teamsFilter } }],
         },
       };
     }
@@ -121,12 +132,12 @@ export async function GET(req: Request) {
       }),
     ]);
 
-    const facetSeasons = seasonRows.map((s) => ({
+    const facetSeasons: Facet[] = seasonRows.map((s) => ({
       value: String(s.season),
       label: String(s.season),
     }));
 
-    const facetTypes = (typeRows.map((t) => t.type).filter(Boolean) as string[])
+    const facetTypes: Facet[] = (typeRows.map((t) => t.type).filter(Boolean) as string[])
       .sort()
       .map((t) => ({ value: t, label: prettyType(t) }));
 
@@ -160,14 +171,14 @@ export async function GET(req: Request) {
       rosterIdToTeamLabelRootSeason.set(r.rosterId, label);
     }
 
-    const facetTeams = teamRosters.map((r) => ({
+    const facetTeams: Facet[] = teamRosters.map((r) => ({
       value: String(r.rosterId),
       label: (rosterIdToTeamLabelRootSeason.get(r.rosterId) || `Roster ${r.rosterId}`)
         .replace(/^Roster\s+\d+\s*[-–:]?\s*/i, "")
         .trim(),
     }));
 
-    // For page rows, we need roster labels per (leagueId, season) for historic owners
+    // For page rows, we need roster labels per (leagueId, season)
     const leagueSeasonPairs = uniq(rows.map((t) => `${t.leagueId}::${t.season}`)).map((k) => {
       const [lid, s] = k.split("::");
       return { leagueId: lid, season: Number(s) };
@@ -176,7 +187,9 @@ export async function GET(req: Request) {
     const rosterRows =
       leagueSeasonPairs.length > 0
         ? await db.roster.findMany({
-            where: { OR: leagueSeasonPairs.map((p) => ({ leagueId: p.leagueId, season: p.season })) },
+            where: {
+              OR: leagueSeasonPairs.map((p) => ({ leagueId: p.leagueId, season: p.season })),
+            },
             select: { leagueId: true, season: true, rosterId: true, ownerId: true },
           })
         : [];
@@ -236,12 +249,14 @@ export async function GET(req: Request) {
       const ys = typeof a.pickSeason === "number" ? a.pickSeason : null;
       const rd = typeof a.pickRound === "number" ? a.pickRound : null;
 
+      // Use pickSeason to choose the correct leagueId for roster naming, but fall back safely
       const seasonForNames = ys ?? t.season;
       const lidForNames =
         (ys && seasonToLeagueId.get(ys)) ||
         seasonToLeagueId.get(teamsSeason) ||
         t.leagueId;
 
+      // IMPORTANT: fromRosterId is the "original pick owner" in Sleeper trade assets
       const original = typeof a.fromRosterId === "number" ? a.fromRosterId : null;
       const originalTeam =
         original !== null ? rosterLabel(lidForNames, seasonForNames, original) : null;
@@ -259,7 +274,6 @@ export async function GET(req: Request) {
       return a.kind ?? "asset";
     };
 
-    // Build output per transaction
     const items: TxOut[] = rows.map((t: any) => {
       const involvedRosterIds = uniq(
         t.assets
@@ -271,7 +285,6 @@ export async function GET(req: Request) {
         .map((rid) => rosterLabel(t.leagueId, t.season, rid))
         .filter((x) => x !== "—");
 
-      // received/sent per rosterId based on toRosterId/fromRosterId
       const receivedMap = new Map<number, string[]>();
       const sentMap = new Map<number, string[]>();
 
@@ -279,7 +292,6 @@ export async function GET(req: Request) {
         const from = a.fromRosterId;
         const to = a.toRosterId;
 
-        // Only count "moves" between rosters for trades
         if (t.type === "trade") {
           if (typeof from === "number" && typeof to === "number" && from !== to) {
             const recv = receivedMap.get(to) ?? [];
@@ -293,9 +305,7 @@ export async function GET(req: Request) {
           continue;
         }
 
-        // Non-trades:
-        // - Added: toRosterId exists and fromRosterId null
-        // - Dropped: fromRosterId exists and toRosterId null
+        // Non-trades: Added/Dropped semantics
         if (typeof to === "number" && (from === null || from === undefined)) {
           const recv = receivedMap.get(to) ?? [];
           recv.push(assetLabel(t, a));
@@ -305,11 +315,6 @@ export async function GET(req: Request) {
           const sent = sentMap.get(from) ?? [];
           sent.push(assetLabel(t, a));
           sentMap.set(from, sent);
-        }
-
-        // Some free_agent entries in your DB represent swaps (both set) — keep them as add/drop:
-        if (typeof from === "number" && typeof to === "number" && from === to) {
-          // ignore self-moves
         }
       }
 
@@ -325,7 +330,6 @@ export async function GET(req: Request) {
         items: list,
       }));
 
-      // For trades, keep consistent ordering (by rosterId)
       received.sort((a, b) => a.rosterId - b.rosterId);
       sent.sort((a, b) => a.rosterId - b.rosterId);
 
