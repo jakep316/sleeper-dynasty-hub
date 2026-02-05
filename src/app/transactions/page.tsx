@@ -50,11 +50,16 @@ async function getLeagueChainIds(startLeagueId: string, max = 20) {
   return ids;
 }
 
+function toInt(v: any): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 export default async function TransactionsPage({ searchParams }: Props) {
   const rootLeagueId = process.env.SLEEPER_LEAGUE_ID!;
   if (!rootLeagueId) throw new Error("Missing SLEEPER_LEAGUE_ID env var");
 
-  // ✅ IMPORTANT: query across the whole chain (2026 + previous years)
   const leagueIds = await getLeagueChainIds(rootLeagueId);
 
   const seasonParam = searchParams?.season ?? "all";
@@ -72,7 +77,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
     where.assets = { some: { OR: [{ fromRosterId: teamId }, { toRosterId: teamId }] } };
   }
 
-  // ---- Dropdown data (across chain) ----
+  // ---- Dropdown data ----
   const [seasonRows, typeRows] = await Promise.all([
     db.transaction.findMany({
       where: { leagueId: { in: leagueIds } },
@@ -104,7 +109,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
-  // ---- Build roster -> owner label map for any (leagueId, season) on this page ----
+  // ---- Roster -> owner label map (for rows on this page) ----
   const leagueSeasonPairs = Array.from(
     new Set(transactions.map((t) => `${t.leagueId}::${t.season}`))
   ).map((k) => {
@@ -145,7 +150,7 @@ export default async function TransactionsPage({ searchParams }: Props) {
     return rosterLabelMap.get(`${lid}::${season}::${rosterId}`) ?? `Roster ${rosterId}`;
   };
 
-  // ---- Player map for page ----
+  // ---- Player map ----
   const playerIds = uniq(
     transactions
       .flatMap((t) => t.assets)
@@ -171,23 +176,48 @@ export default async function TransactionsPage({ searchParams }: Props) {
     return parts.length ? `${name} (${parts.join(", ")})` : name;
   };
 
+  // ✅ FIX: match the correct draft_picks row using season+round+toRosterId+fromRosterId
   function pickLabel(t: any, a: any) {
-    const ys = typeof a.pickSeason === "number" ? String(a.pickSeason) : "?";
-    const rd = typeof a.pickRound === "number" ? String(a.pickRound) : "?";
+    const ys = typeof a.pickSeason === "number" ? a.pickSeason : null;
+    const rd = typeof a.pickRound === "number" ? a.pickRound : null;
+
+    if (!ys || !rd) return "Pick";
 
     const raw = t.rawJson as any;
     const dp = Array.isArray(raw?.draft_picks) ? raw.draft_picks : [];
 
-    const match =
-      dp.find((p: any) => String(p?.season) === ys && Number(p?.round) === Number(rd)) ?? null;
+    const toRid = typeof a.toRosterId === "number" ? a.toRosterId : null;
+    const fromRid = typeof a.fromRosterId === "number" ? a.fromRosterId : null;
 
-    const original =
-      match?.original_owner_id ??
-      match?.original_owner_roster_id ??
-      match?.owner_id ??
-      null;
+    // First, try strongest match
+    let match =
+      dp.find((p: any) => {
+        const season = toInt(p?.season);
+        const round = toInt(p?.round);
+        const owner = toInt(p?.owner_id);
+        const prev = toInt(p?.previous_owner_id);
+        return (
+          season === ys &&
+          round === rd &&
+          (toRid === null || owner === toRid) &&
+          (fromRid === null || prev === fromRid)
+        );
+      }) ?? null;
 
-    const label = original ? rosterLabel(t.leagueId, t.season, Number(original)) : null;
+    // Fallback: if previous_owner_id is missing in that season payload, match by owner only
+    if (!match && toRid !== null) {
+      match =
+        dp.find((p: any) => {
+          const season = toInt(p?.season);
+          const round = toInt(p?.round);
+          const owner = toInt(p?.owner_id);
+          return season === ys && round === rd && owner === toRid;
+        }) ?? null;
+    }
+
+    const original = toInt(match?.original_owner_id) ?? null;
+    const label = original ? rosterLabel(t.leagueId, t.season, original) : null;
+
     return label ? `${ys} R${rd} (${label} pick)` : `${ys} R${rd}`;
   }
 
@@ -202,7 +232,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
   const seasonForRosterDropdown =
     seasonParam !== "all" ? Number(seasonParam) : seasons[0] ?? new Date().getFullYear();
 
-  // Use the leagueId from the chain that matches this season if possible
   const leagueIdForRosterDropdown =
     transactions.find((t) => t.season === seasonForRosterDropdown)?.leagueId ??
     leagueIds[0] ??
@@ -336,9 +365,6 @@ export default async function TransactionsPage({ searchParams }: Props) {
         <h1 className="text-2xl font-bold">Transactions</h1>
         <p className="mt-1 text-sm text-zinc-600">
           Showing <span className="font-semibold text-zinc-900">{totalCount}</span> total
-        </p>
-        <p className="mt-1 text-xs text-zinc-500">
-          League chain IDs: {leagueIds.length} seasons detected
         </p>
       </div>
 
