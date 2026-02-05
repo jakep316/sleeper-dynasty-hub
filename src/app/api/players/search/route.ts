@@ -1,18 +1,16 @@
+// src/app/api/players/search/route.ts
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
-    const qRaw = (url.searchParams.get("q") ?? "").trim();
+    const q = (url.searchParams.get("q") ?? "").trim();
 
-    if (qRaw.length < 3) {
-      return NextResponse.json({ ok: true, q: qRaw, results: [] });
+    if (q.length < 3) {
+      return NextResponse.json({ ok: true, q, results: [] });
     }
 
-    const q = qRaw;
-
-    // Basic contains search, then rank so "startsWith" rises
     const rows = await db.sleeperPlayer.findMany({
       where: {
         OR: [
@@ -20,27 +18,22 @@ export async function GET(req: Request) {
           { team: { contains: q, mode: "insensitive" } },
         ],
       },
-      select: { id: true, fullName: true, position: true, team: true, status: true },
       take: 25,
+      select: { id: true, fullName: true, position: true, team: true, status: true },
     });
 
-    const lower = q.toLowerCase();
-
-    const ranked = rows
+    // rank: startsWith > contains
+    const ql = q.toLowerCase();
+    const scored = rows
       .map((r) => {
         const name = (r.fullName ?? "").toLowerCase();
-        const starts = name.startsWith(lower) ? 0 : 1;
-        return { ...r, _rank: starts };
+        const score = name.startsWith(ql) ? 0 : name.includes(ql) ? 1 : 2;
+        return { r, score };
       })
-      .sort((a, b) => a._rank - b._rank || (a.fullName ?? "").localeCompare(b.fullName ?? ""))
-      .slice(0, 10)
-      .map(({ _rank, ...rest }) => rest);
+      .sort((a, b) => a.score - b.score);
 
-    return NextResponse.json({ ok: true, q: qRaw, results: ranked });
+    return NextResponse.json({ ok: true, q, results: scored.map((s) => s.r).slice(0, 10) });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? "Unknown error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: e?.message ?? String(e) }, { status: 500 });
   }
 }

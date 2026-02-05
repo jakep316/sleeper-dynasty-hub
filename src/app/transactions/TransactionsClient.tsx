@@ -1,306 +1,426 @@
-// src/app/transactions/TransactionsClient.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import * as React from "react";
 
 type Facet = { value: string; label: string };
-
-type TxTeamBlock = {
-  rosterId: number;
-  team: string;
-  items: string[];
-};
 
 type TxItem = {
   id: string;
   leagueId: string;
   season: number;
-  week: number;
   type: string;
   typeLabel: string;
   createdAt: string;
+
   teams: string[];
-  received: TxTeamBlock[];
-  sent: TxTeamBlock[];
+
+  received: { rosterId: number; team: string; items: string[] }[];
+  sent: { rosterId: number; team: string; items: string[] }[];
+
+  added?: { rosterId: number; team: string; items: string[]; faab?: number }[];
+  dropped?: { rosterId: number; team: string; items: string[] }[];
 };
 
-type ApiResponse =
-  | {
-      ok: true;
-      rootLeagueId: string;
-      leagueIds: string[];
-      total: number;
-      page: number;
-      pageSize: number;
-      totalPages: number;
-      items: TxItem[];
-      facets: {
-        seasons: Facet[];
-        types: Facet[];
-        teams: Facet[];
-        teamsSeason: number;
-      };
+type ApiResp = {
+  ok: boolean;
+  rootLeagueId: string;
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  items: TxItem[];
+  facets: {
+    seasons: Facet[];
+    types: Facet[];
+    teams: Facet[];
+    teamsSeason: number;
+  };
+  error?: string;
+};
+
+type PlayerSearchResp = {
+  ok: boolean;
+  q: string;
+  results: { id: string; fullName: string | null; position: string | null; team: string | null; status: string | null }[];
+  error?: string;
+};
+
+function buildQuery(params: Record<string, string | number | null | undefined>) {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === null || v === undefined || v === "") continue;
+    sp.set(k, String(v));
+  }
+  const s = sp.toString();
+  return s ? `?${s}` : "";
+}
+
+function fmtDate(iso: string) {
+  try {
+    return new Date(iso).toLocaleDateString();
+  } catch {
+    return iso;
+  }
+}
+
+export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: string }) {
+  // multi-select filters
+  const [seasonSel, setSeasonSel] = React.useState<string[]>([]);
+  const [typeSel, setTypeSel] = React.useState<string[]>([]);
+  const [teamSel, setTeamSel] = React.useState<string[]>([]);
+
+  const [page, setPage] = React.useState(1);
+  const pageSize = 50;
+
+  const [data, setData] = React.useState<ApiResp | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr] = React.useState<string | null>(null);
+
+  // Player search
+  const [playerQ, setPlayerQ] = React.useState("");
+  const [playerOpen, setPlayerOpen] = React.useState(false);
+  const [playerLoading, setPlayerLoading] = React.useState(false);
+  const [playerResults, setPlayerResults] = React.useState<PlayerSearchResp["results"]>([]);
+  const [playerErr, setPlayerErr] = React.useState<string | null>(null);
+
+  // ---- load transactions ----
+  const load = React.useCallback(async () => {
+    setLoading(true);
+    setErr(null);
+    try {
+      const season = seasonSel.join(",");
+      const type = typeSel.join(",");
+      const team = teamSel.join(",");
+
+      const qs = buildQuery({
+        leagueId: rootLeagueId,
+        season,
+        type,
+        team,
+        page,
+        pageSize,
+      });
+
+      const res = await fetch(`/api/transactions${qs}`, { cache: "no-store" });
+      const json = (await res.json()) as ApiResp;
+
+      if (!json.ok) {
+        setErr(json.error ?? "Failed to load transactions.");
+        setData(null);
+      } else {
+        setData(json);
+      }
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+      setData(null);
+    } finally {
+      setLoading(false);
     }
-  | { ok: false; error: string };
+  }, [rootLeagueId, seasonSel, typeSel, teamSel, page]);
 
-function toCsv(values: string[]) {
-  const v = values.filter(Boolean);
-  return v.length ? v.join(",") : "";
-}
+  React.useEffect(() => {
+    load();
+  }, [load]);
 
-function fromCsv(value: string | null) {
-  if (!value) return [];
-  return value
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
+  // reset to page 1 when filters change
+  React.useEffect(() => {
+    setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seasonSel.join(","), typeSel.join(","), teamSel.join(",")]);
 
-function clamp(n: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, n));
-}
-
-export default function TransactionsClient({ leagueId }: { leagueId: string }) {
-  const initial = useMemo(() => {
-    const sp = new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
-    return {
-      seasons: fromCsv(sp.get("season")),
-      types: fromCsv(sp.get("type")),
-      teams: fromCsv(sp.get("team")),
-      page: Math.max(1, Number(sp.get("page") ?? "1")),
-    };
-  }, []);
-
-  const [selectedSeasons, setSelectedSeasons] = useState<string[]>(initial.seasons);
-  const [selectedTypes, setSelectedTypes] = useState<string[]>(initial.types);
-  const [selectedTeams, setSelectedTeams] = useState<string[]>(initial.teams);
-  const [page, setPage] = useState<number>(initial.page);
-
-  const [data, setData] = useState<ApiResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const qs = useMemo(() => {
-    const sp = new URLSearchParams();
-    sp.set("leagueId", leagueId);
-
-    const season = toCsv(selectedSeasons);
-    const type = toCsv(selectedTypes);
-    const team = toCsv(selectedTeams);
-
-    if (season) sp.set("season", season);
-    if (type) sp.set("type", type);
-    if (team) sp.set("team", team);
-
-    sp.set("page", String(page));
-    sp.set("pageSize", "50");
-
-    return sp.toString();
-  }, [leagueId, selectedSeasons, selectedTypes, selectedTeams, page]);
-
-  useEffect(() => {
-    const url = new URL(window.location.href);
-    url.search = qs;
-    window.history.replaceState({}, "", url.toString());
-  }, [qs]);
-
-  useEffect(() => {
-    let cancelled = false;
+  // ---- player autocomplete (>= 3 chars) ----
+  React.useEffect(() => {
+    let alive = true;
 
     async function run() {
-      setLoading(true);
+      const q = playerQ.trim();
+      if (q.length < 3) {
+        setPlayerResults([]);
+        setPlayerErr(null);
+        return;
+      }
+      setPlayerLoading(true);
+      setPlayerErr(null);
       try {
-        const res = await fetch(`/api/transactions?${qs}`, { cache: "no-store" });
-        const json = (await res.json()) as ApiResponse;
-        if (!cancelled) setData(json);
+        const res = await fetch(`/api/players/search${buildQuery({ q })}`, { cache: "no-store" });
+        const json = (await res.json()) as PlayerSearchResp;
+        if (!alive) return;
+        if (!json.ok) {
+          setPlayerErr(json.error ?? "Search failed.");
+          setPlayerResults([]);
+        } else {
+          setPlayerResults(json.results ?? []);
+        }
       } catch (e: any) {
-        if (!cancelled) setData({ ok: false, error: e?.message ?? String(e) });
+        if (!alive) return;
+        setPlayerErr(e?.message ?? String(e));
+        setPlayerResults([]);
       } finally {
-        if (!cancelled) setLoading(false);
+        if (alive) setPlayerLoading(false);
       }
     }
 
-    run();
+    const t = setTimeout(run, 200);
     return () => {
-      cancelled = true;
+      alive = false;
+      clearTimeout(t);
     };
-  }, [qs]);
+  }, [playerQ]);
 
-  useEffect(() => {
-    setPage(1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSeasons.join(","), selectedTypes.join(","), selectedTeams.join(",")]);
-
-  const facets = data && data.ok ? data.facets : null;
-
-  const teamFacetClean = useMemo(() => {
-    if (!facets) return [];
-    return facets.teams.map((t) => ({
-      ...t,
-      label: t.label.replace(/^Roster\s+\d+\s*[-–:]?\s*/i, "").trim(),
-    }));
-  }, [facets]);
-
-  function toggle(list: string[], value: string) {
-    if (list.includes(value)) return list.filter((v) => v !== value);
-    return [...list, value];
+  function toggle(list: string[], v: string, setList: (x: string[]) => void) {
+    setList(list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
   }
 
-  const totalPages = data && data.ok ? data.totalPages : 1;
+  function clearAll() {
+    setSeasonSel([]);
+    setTypeSel([]);
+    setTeamSel([]);
+    setPlayerQ("");
+    setPlayerResults([]);
+  }
 
-  function renderMoves(t: TxItem) {
-    // Trades: ONLY show "received" blocks to avoid duplication
-    if (t.type === "trade") {
-      if (!t.received?.length) return <span className="text-zinc-400">—</span>;
-      return (
-        <div className="space-y-2">
-          {t.received.map((r) => (
-            <div key={`recv-${t.id}-${r.rosterId}`} className="leading-snug">
-              <div className="font-semibold text-zinc-900">{r.team} received</div>
-              <div className="text-zinc-700">{r.items.join(", ")}</div>
-            </div>
-          ))}
-        </div>
-      );
-    }
+  // client-side filter by player: hide transactions that don’t include that player id
+  // We do NOT fetch by player server-side (keeps API simple).
+  const filteredItems = React.useMemo(() => {
+    if (!data?.items) return [];
+    const q = playerQ.trim().toLowerCase();
+    if (q.length < 3) return data.items;
 
-    // Non-trades: show Added / Dropped (not received/sent)
-    const addedBlocks = t.received ?? [];
-    const droppedBlocks = t.sent ?? [];
+    // If they selected a suggestion, we'll store the exact name in input; still filter by substring on rendered strings
+    // (good enough UX; we can upgrade to id-based filtering later if you want)
+    return data.items.filter((t) => {
+      const hay = JSON.stringify(t).toLowerCase();
+      return hay.includes(q);
+    });
+  }, [data?.items, playerQ]);
 
-    // Most non-trade txns are single-team; just flatten items
-    const added = addedBlocks.flatMap((b) => b.items);
-    const dropped = droppedBlocks.flatMap((b) => b.items);
+  const totalPages = data?.totalPages ?? 1;
 
-    if (!added.length && !dropped.length) return <span className="text-zinc-400">—</span>;
-
-    return (
-      <div className="space-y-1">
-        {added.length > 0 && <div className="text-emerald-700">Added: {added.join(", ")}</div>}
-        {dropped.length > 0 && <div className="text-rose-700">Dropped: {dropped.join(", ")}</div>}
+  const Pager = ({ className }: { className?: string }) => (
+    <div
+      className={`rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm text-sm text-zinc-600 flex flex-wrap gap-3 items-center justify-between ${
+        className ?? ""
+      }`}
+    >
+      <div>
+        Showing{" "}
+        <span className="font-semibold text-zinc-900">
+          {filteredItems.length}
+        </span>{" "}
+        {data ? (
+          <>
+            of <span className="font-semibold text-zinc-900">{data.total}</span>
+          </>
+        ) : null}
       </div>
-    );
-  }
+
+      <div className="flex items-center gap-3">
+        <button
+          className={`rounded-xl px-3 py-2 font-semibold ${
+            page <= 1 ? "text-zinc-400" : "text-zinc-900 hover:bg-zinc-100"
+          }`}
+          onClick={() => page > 1 && setPage(page - 1)}
+          disabled={page <= 1}
+        >
+          ← Prev
+        </button>
+
+        <div className="text-zinc-600">
+          Page <span className="font-semibold text-zinc-900">{page}</span> of{" "}
+          <span className="font-semibold text-zinc-900">{totalPages}</span>
+        </div>
+
+        <button
+          className={`rounded-xl px-3 py-2 font-semibold ${
+            page >= totalPages ? "text-zinc-400" : "text-zinc-900 hover:bg-zinc-100"
+          }`}
+          onClick={() => page < totalPages && setPage(page + 1)}
+          disabled={page >= totalPages}
+        >
+          Next →
+        </button>
+      </div>
+    </div>
+  );
 
   return (
     <main className="mx-auto max-w-6xl p-6 space-y-6">
       <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold">Transactions</h1>
             <p className="mt-1 text-sm text-zinc-600">
-              {data?.ok ? (
+              {data ? (
                 <>
-                  Showing <span className="font-semibold text-zinc-900">{data.total}</span> total
+                  Total in league history:{" "}
+                  <span className="font-semibold text-zinc-900">{data.total}</span>
                 </>
               ) : (
-                <>Sleeper league history</>
+                <>Loading league history…</>
               )}
             </p>
           </div>
 
-          <div className="text-sm text-zinc-500">
-            {loading ? "Loading…" : data?.ok ? `Page ${data.page} of ${data.totalPages}` : ""}
-          </div>
-        </div>
-      </div>
-
-      {/* Filters */}
-      <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div>
-            <div className="text-sm font-semibold text-zinc-900 mb-2">Seasons</div>
-            <div className="max-h-48 overflow-auto rounded-2xl border border-zinc-200 p-3 space-y-2">
-              {facets?.seasons?.map((s) => (
-                <label key={s.value} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={selectedSeasons.includes(s.value)}
-                    onChange={() => setSelectedSeasons((prev) => toggle(prev, s.value))}
-                  />
-                  <span>{s.label}</span>
-                </label>
-              ))}
-              {!facets && <div className="text-sm text-zinc-500">Loading seasons…</div>}
-            </div>
-          </div>
-
-          <div>
-            <div className="text-sm font-semibold text-zinc-900 mb-2">Types</div>
-            <div className="max-h-48 overflow-auto rounded-2xl border border-zinc-200 p-3 space-y-2">
-              {facets?.types?.map((t) => (
-                <label key={t.value} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={selectedTypes.includes(t.value)}
-                    onChange={() => setSelectedTypes((prev) => toggle(prev, t.value))}
-                  />
-                  <span>{t.label}</span>
-                </label>
-              ))}
-              {!facets && <div className="text-sm text-zinc-500">Loading types…</div>}
-            </div>
-          </div>
-
-          <div>
-            <div className="text-sm font-semibold text-zinc-900 mb-2">Teams</div>
-            <div className="max-h-48 overflow-auto rounded-2xl border border-zinc-200 p-3 space-y-2">
-              {teamFacetClean?.map((t) => (
-                <label key={t.value} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={selectedTeams.includes(t.value)}
-                    onChange={() => setSelectedTeams((prev) => toggle(prev, t.value))}
-                  />
-                  <span>{t.label}</span>
-                </label>
-              ))}
-              {!facets && <div className="text-sm text-zinc-500">Loading teams…</div>}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-          <div className="text-zinc-600">
-            Filters:
-            <span className="ml-2 text-zinc-900 font-semibold">
-              {selectedSeasons.length ? `${selectedSeasons.length} seasons` : "All seasons"}
-            </span>
-            <span className="mx-2 text-zinc-300">•</span>
-            <span className="text-zinc-900 font-semibold">
-              {selectedTypes.length ? `${selectedTypes.length} types` : "All types"}
-            </span>
-            <span className="mx-2 text-zinc-300">•</span>
-            <span className="text-zinc-900 font-semibold">
-              {selectedTeams.length ? `${selectedTeams.length} teams` : "All teams"}
-            </span>
-          </div>
-
           <button
-            className="rounded-xl border border-zinc-200 px-3 py-2 hover:bg-zinc-50 font-semibold"
-            onClick={() => {
-              setSelectedSeasons([]);
-              setSelectedTypes([]);
-              setSelectedTeams([]);
-              setPage(1);
-            }}
+            className="rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-zinc-50"
+            onClick={clearAll}
           >
             Clear filters
           </button>
         </div>
       </div>
 
-      {data?.ok === false && (
-        <div className="rounded-3xl border border-rose-200 bg-rose-50 p-5 text-rose-800">
-          {data.error}
+      {/* Filters */}
+      <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm space-y-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          {/* Seasons */}
+          <div className="space-y-2">
+            <div className="text-sm font-semibold text-zinc-900">Seasons</div>
+            <div className="flex flex-wrap gap-2">
+              {(data?.facets?.seasons ?? []).map((s) => (
+                <button
+                  key={s.value}
+                  onClick={() => toggle(seasonSel, s.value, setSeasonSel)}
+                  className={`rounded-2xl px-3 py-2 text-sm font-semibold border ${
+                    seasonSel.includes(s.value)
+                      ? "border-zinc-900 bg-zinc-900 text-white"
+                      : "border-zinc-200 bg-white text-zinc-900 hover:bg-zinc-50"
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
+              {(!data?.facets?.seasons || data.facets.seasons.length === 0) && (
+                <div className="text-sm text-zinc-500">No seasons loaded yet.</div>
+              )}
+            </div>
+          </div>
+
+          {/* Types */}
+          <div className="space-y-2">
+            <div className="text-sm font-semibold text-zinc-900">Types</div>
+            <div className="flex flex-wrap gap-2">
+              {(data?.facets?.types ?? []).map((t) => (
+                <button
+                  key={t.value}
+                  onClick={() => toggle(typeSel, t.value, setTypeSel)}
+                  className={`rounded-2xl px-3 py-2 text-sm font-semibold border ${
+                    typeSel.includes(t.value)
+                      ? "border-zinc-900 bg-zinc-900 text-white"
+                      : "border-zinc-200 bg-white text-zinc-900 hover:bg-zinc-50"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Teams */}
+          <div className="space-y-2">
+            <div className="text-sm font-semibold text-zinc-900">Teams</div>
+            <div className="flex flex-wrap gap-2">
+              {(data?.facets?.teams ?? []).map((t) => (
+                <button
+                  key={t.value}
+                  onClick={() => toggle(teamSel, t.value, setTeamSel)}
+                  className={`rounded-2xl px-3 py-2 text-sm font-semibold border ${
+                    teamSel.includes(t.value)
+                      ? "border-zinc-900 bg-zinc-900 text-white"
+                      : "border-zinc-200 bg-white text-zinc-900 hover:bg-zinc-50"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Player search */}
+        <div className="pt-2">
+          <div className="text-sm font-semibold text-zinc-900">Player search</div>
+          <div className="relative mt-2 max-w-xl">
+            <input
+              value={playerQ}
+              onChange={(e) => {
+                setPlayerQ(e.target.value);
+                setPlayerOpen(true);
+              }}
+              onFocus={() => setPlayerOpen(true)}
+              onBlur={() => setTimeout(() => setPlayerOpen(false), 150)}
+              placeholder="Type 3+ chars (e.g. metchie, jefferson)…"
+              className="w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-900 outline-none focus:border-zinc-900"
+            />
+
+            {playerOpen && playerQ.trim().length >= 3 && (
+              <div className="absolute z-20 mt-2 w-full overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-lg">
+                {playerLoading && (
+                  <div className="p-3 text-sm text-zinc-600">Searching…</div>
+                )}
+
+                {playerErr && (
+                  <div className="p-3 text-sm text-rose-700">{playerErr}</div>
+                )}
+
+                {!playerLoading && !playerErr && playerResults.length === 0 && (
+                  <div className="p-3 text-sm text-zinc-600">No matches.</div>
+                )}
+
+                {!playerLoading &&
+                  !playerErr &&
+                  playerResults.slice(0, 10).map((p) => {
+                    const name = p.fullName ?? p.id;
+                    const meta = [p.position, p.team].filter(Boolean).join(", ");
+                    return (
+                      <button
+                        key={p.id}
+                        className="w-full text-left px-4 py-3 hover:bg-zinc-50"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          setPlayerQ(name);
+                          setPlayerOpen(false);
+                        }}
+                      >
+                        <div className="text-sm font-semibold text-zinc-900">{name}</div>
+                        <div className="text-xs text-zinc-600">
+                          {meta || "—"} {p.status ? `• ${p.status}` : ""}
+                        </div>
+                      </button>
+                    );
+                  })}
+              </div>
+            )}
+          </div>
+
+          <div className="mt-2 text-xs text-zinc-500">
+            Tip: This hides non-matching rows on the current page. (We can upgrade to server-side player filtering later.)
+          </div>
+        </div>
+      </div>
+
+      {/* Errors / loading */}
+      {err && (
+        <div className="rounded-3xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+          {err}
         </div>
       )}
 
+      {loading && (
+        <div className="rounded-3xl border border-zinc-200 bg-white p-4 text-sm text-zinc-600">
+          Loading…
+        </div>
+      )}
+
+      {/* Pager (top) */}
+      <Pager />
+
+      {/* Table */}
       <div className="rounded-3xl border border-zinc-200 bg-white shadow-sm overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-zinc-50 text-zinc-600">
             <tr>
               <th className="text-left p-3">Season</th>
-              <th className="text-left p-3">Week</th>
               <th className="text-left p-3">Date</th>
               <th className="text-left p-3">Type</th>
               <th className="text-left p-3">Teams</th>
@@ -309,26 +429,67 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
           </thead>
 
           <tbody>
-            {data?.ok &&
-              data.items.map((t) => (
-                <tr key={t.id} className="border-t align-top">
-                  <td className="p-3 whitespace-nowrap">{t.season}</td>
-                  <td className="p-3 whitespace-nowrap">{t.week}</td>
-                  <td className="p-3 whitespace-nowrap">
-                    {new Date(t.createdAt).toLocaleDateString()}
-                  </td>
-                  <td className="p-3 whitespace-nowrap">{t.typeLabel}</td>
-                  <td className="p-3 whitespace-nowrap">
-                    {t.teams && t.teams.length ? t.teams.join(" ↔ ") : "—"}
-                  </td>
-                  <td className="p-3">{renderMoves(t)}</td>
-                </tr>
-              ))}
+            {filteredItems.map((t) => (
+              <tr key={t.id} className="border-t align-top">
+                <td className="p-3 whitespace-nowrap">{t.season}</td>
+                <td className="p-3 whitespace-nowrap">{fmtDate(t.createdAt)}</td>
+                <td className="p-3 whitespace-nowrap">{t.typeLabel}</td>
+                <td className="p-3 whitespace-nowrap">{t.teams.join(" ↔ ") || "—"}</td>
+                <td className="p-3">
+                  {/* Trade */}
+                  {t.type === "trade" ? (
+                    <div className="space-y-2">
+                      {t.received.map((r) => (
+                        <div key={`recv-${r.rosterId}`} className="leading-snug">
+                          <div className="font-semibold text-zinc-900">{r.team} received</div>
+                          <div className="text-zinc-700">{r.items.join(", ") || "—"}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    // Non-trade: Added/Dropped (+ FAAB)
+                    <div className="space-y-2">
+                      {t.added && t.added.length > 0 && (
+                        <div className="space-y-1">
+                          {t.added.map((a) => (
+                            <div key={`add-${a.rosterId}`} className="text-emerald-800">
+                              <span className="font-semibold">{a.team}</span>: Added{" "}
+                              {a.items.join(", ") || "—"}
+                              {typeof a.faab === "number" && a.faab > 0 ? (
+                                <span className="ml-2 text-emerald-900 font-semibold">
+                                  (FAAB ${a.faab})
+                                </span>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      )}
 
-            {data?.ok && data.items.length === 0 && (
+                      {t.dropped && t.dropped.length > 0 && (
+                        <div className="space-y-1">
+                          {t.dropped.map((d) => (
+                            <div key={`drop-${d.rosterId}`} className="text-rose-800">
+                              <span className="font-semibold">{d.team}</span>: Dropped{" "}
+                              {d.items.join(", ") || "—"}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {(!t.added || t.added.length === 0) &&
+                        (!t.dropped || t.dropped.length === 0) && (
+                          <span className="text-zinc-400">—</span>
+                        )}
+                    </div>
+                  )}
+                </td>
+              </tr>
+            ))}
+
+            {filteredItems.length === 0 && (
               <tr>
-                <td className="p-6 text-zinc-600" colSpan={6}>
-                  No transactions found with the current filters.
+                <td className="p-6 text-zinc-600" colSpan={5}>
+                  No transactions match the current filters.
                 </td>
               </tr>
             )}
@@ -336,33 +497,8 @@ export default function TransactionsClient({ leagueId }: { leagueId: string }) {
         </table>
       </div>
 
-      {/* Pagination */}
-      <div className="flex items-center justify-between">
-        <button
-          className={`rounded-xl px-3 py-2 font-semibold ${
-            page <= 1 ? "text-zinc-400 cursor-not-allowed" : "hover:bg-zinc-100"
-          }`}
-          disabled={page <= 1}
-          onClick={() => setPage((p) => Math.max(1, p - 1))}
-        >
-          ← Prev
-        </button>
-
-        <div className="text-sm text-zinc-600">
-          Page <span className="font-semibold text-zinc-900">{page}</span> of{" "}
-          <span className="font-semibold text-zinc-900">{totalPages}</span>
-        </div>
-
-        <button
-          className={`rounded-xl px-3 py-2 font-semibold ${
-            page >= totalPages ? "text-zinc-400 cursor-not-allowed" : "hover:bg-zinc-100"
-          }`}
-          disabled={page >= totalPages}
-          onClick={() => setPage((p) => clamp(p + 1, 1, totalPages))}
-        >
-          Next →
-        </button>
-      </div>
+      {/* Pager (bottom) */}
+      <Pager className="mb-8" />
     </main>
   );
 }
