@@ -4,8 +4,8 @@ import {
   getLeague,
   getLeagueUsers,
   getLeagueRosters,
-  getMatchupsForWeek,
-  getTransactions, // <-- FIX: this is what your sleeper.ts exports
+  getMatchups,      // <-- FIX
+  getTransactions,  // <-- FIX
 } from "@/lib/sleeper";
 
 /*
@@ -47,7 +47,7 @@ export async function POST(req: Request) {
     // ---------------- MATCHUPS ----------------
     let matchupsUpserted = 0;
     for (let week = 1; week <= 18; week++) {
-      const matchups = await getMatchupsForWeek(leagueId, week);
+      const matchups = await getMatchups(leagueId, week); // <-- FIX
       if (!matchups?.length) continue;
 
       for (const m of matchups) {
@@ -167,7 +167,6 @@ function buildMovements(t: any) {
     const pickSeason = Number(p.season);
     const pickRound = Number(p.round);
 
-    // Sleeper fields vary slightly by sport/version; these are the common ones
     const toRosterId =
       typeof p.owner_id === "number"
         ? p.owner_id
