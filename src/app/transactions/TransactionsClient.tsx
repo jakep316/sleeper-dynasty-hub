@@ -49,25 +49,77 @@ type ApiResponse = {
 
 type Props = {
   rootLeagueId: string;
-  seasons: Option[]; // checkbox list
-  types: Option[]; // checkbox list
-  teams: Option[]; // checkbox list (roster ids w/ labels)
+  seasons: Option[];
+  types: Option[];
+  teams: Option[];
 };
 
 function cls(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
+function Pager({
+  page,
+  totalPages,
+  loading,
+  onPrev,
+  onNext,
+}: {
+  page: number;
+  totalPages: number;
+  loading: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  return (
+    <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm text-sm text-zinc-600 flex flex-wrap gap-3 items-center justify-between">
+      <div>
+        Page <span className="font-semibold text-zinc-900">{page}</span> of{" "}
+        <span className="font-semibold text-zinc-900">{totalPages}</span>
+      </div>
+
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={onPrev}
+          disabled={page <= 1 || loading}
+          className={cls(
+            "rounded-xl px-3 py-2 font-semibold",
+            page <= 1 || loading
+              ? "text-zinc-400 border border-zinc-200"
+              : "text-zinc-900 border border-zinc-200 hover:bg-zinc-50"
+          )}
+        >
+          ← Prev
+        </button>
+
+        <button
+          type="button"
+          onClick={onNext}
+          disabled={page >= totalPages || loading}
+          className={cls(
+            "rounded-xl px-3 py-2 font-semibold",
+            page >= totalPages || loading
+              ? "text-zinc-400 border border-zinc-200"
+              : "text-zinc-900 border border-zinc-200 hover:bg-zinc-50"
+          )}
+        >
+          Next →
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function TransactionsClient({ rootLeagueId, seasons, types, teams }: Props) {
-  const [selectedSeasons, setSelectedSeasons] = useState<string[]>([]); // values are years
+  const [selectedSeasons, setSelectedSeasons] = useState<string[]>([]);
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
-  const [selectedTeams, setSelectedTeams] = useState<string[]>([]); // values are roster ids
+  const [selectedTeams, setSelectedTeams] = useState<string[]>([]);
 
   const [page, setPage] = useState(1);
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // when filters change, reset page to 1
   useEffect(() => {
     setPage(1);
   }, [selectedSeasons.join(","), selectedTypes.join(","), selectedTeams.join(",")]);
@@ -115,6 +167,9 @@ export default function TransactionsClient({ rootLeagueId, seasons, types, teams
   const total = data?.totalCount ?? 0;
   const totalPages = data?.totalPages ?? 1;
   const items = data?.items ?? [];
+
+  const onPrev = () => setPage((p) => Math.max(1, p - 1));
+  const onNext = () => setPage((p) => Math.min(totalPages, p + 1));
 
   return (
     <main className="mx-auto max-w-6xl p-6 space-y-6">
@@ -198,39 +253,8 @@ export default function TransactionsClient({ rootLeagueId, seasons, types, teams
         </div>
       </div>
 
-      {/* Pager */}
-      <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm text-sm text-zinc-600 flex flex-wrap gap-3 items-center justify-between">
-        <div>
-          Page <span className="font-semibold text-zinc-900">{page}</span> of{" "}
-          <span className="font-semibold text-zinc-900">{totalPages}</span>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
-            disabled={page <= 1 || loading}
-            className={cls(
-              "rounded-xl px-3 py-2 font-semibold",
-              page <= 1 || loading ? "text-zinc-400 border border-zinc-200" : "text-zinc-900 border border-zinc-200 hover:bg-zinc-50"
-            )}
-          >
-            ← Prev
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-            disabled={page >= totalPages || loading}
-            className={cls(
-              "rounded-xl px-3 py-2 font-semibold",
-              page >= totalPages || loading ? "text-zinc-400 border border-zinc-200" : "text-zinc-900 border border-zinc-200 hover:bg-zinc-50"
-            )}
-          >
-            Next →
-          </button>
-        </div>
-      </div>
+      {/* Pager (TOP) */}
+      <Pager page={page} totalPages={totalPages} loading={loading} onPrev={onPrev} onNext={onNext} />
 
       {/* Table */}
       <div className="rounded-3xl border border-zinc-200 bg-white shadow-sm overflow-hidden">
@@ -251,9 +275,7 @@ export default function TransactionsClient({ rootLeagueId, seasons, types, teams
               <tr key={t.id} className="border-t align-top">
                 <td className="p-3 whitespace-nowrap">{t.season}</td>
                 <td className="p-3 whitespace-nowrap">{t.week}</td>
-                <td className="p-3 whitespace-nowrap">
-                  {new Date(t.date).toLocaleDateString()}
-                </td>
+                <td className="p-3 whitespace-nowrap">{new Date(t.date).toLocaleDateString()}</td>
                 <td className="p-3 whitespace-nowrap">{t.typeLabel}</td>
                 <td className="p-3 whitespace-nowrap">{t.teamsLabel}</td>
                 <td className="p-3">
@@ -301,11 +323,8 @@ export default function TransactionsClient({ rootLeagueId, seasons, types, teams
         </table>
       </div>
 
+      {/* Pager (BOTTOM) */}
+      <Pager page={page} totalPages={totalPages} loading={loading} onPrev={onPrev} onNext={onNext} />
+
       {data?.ok === false && (
-        <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
-          {data.error ?? "Unknown error"}
-        </div>
-      )}
-    </main>
-  );
-}
+        <div className="rounded-2xl border border-rose-200 bg-ro
