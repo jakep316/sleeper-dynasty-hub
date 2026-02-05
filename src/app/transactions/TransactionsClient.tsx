@@ -1,3 +1,4 @@
+// src/app/transactions/TransactionsClient.tsx
 "use client";
 
 import * as React from "react";
@@ -81,12 +82,14 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
   const [loading, setLoading] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
 
-  // Player search
+  // Player search + server-side selection
   const [playerQ, setPlayerQ] = React.useState("");
   const [playerOpen, setPlayerOpen] = React.useState(false);
   const [playerLoading, setPlayerLoading] = React.useState(false);
   const [playerResults, setPlayerResults] = React.useState<PlayerSearchResp["results"]>([]);
   const [playerErr, setPlayerErr] = React.useState<string | null>(null);
+
+  const [playerId, setPlayerId] = React.useState<string>(""); // ✅ selected player id (server-side filter)
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -97,6 +100,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
         season: seasonSel.join(","),
         type: typeSel.join(","),
         team: teamSel.join(","),
+        playerId: playerId || "",
         page,
         pageSize,
       });
@@ -116,7 +120,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
     } finally {
       setLoading(false);
     }
-  }, [rootLeagueId, seasonSel, typeSel, teamSel, page]);
+  }, [rootLeagueId, seasonSel, typeSel, teamSel, playerId, page]);
 
   React.useEffect(() => {
     load();
@@ -126,7 +130,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
   React.useEffect(() => {
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seasonSel.join(","), typeSel.join(","), teamSel.join(",")]);
+  }, [seasonSel.join(","), typeSel.join(","), teamSel.join(","), playerId]);
 
   // Player autocomplete (>= 3 chars)
   React.useEffect(() => {
@@ -178,17 +182,10 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
     setTeamSel([]);
     setPlayerQ("");
     setPlayerResults([]);
+    setPlayerId("");
   }
 
-  // client-side filter by player query (hide non-matching rows on current page)
-  const filteredItems = React.useMemo(() => {
-    if (!data?.items) return [];
-    const q = playerQ.trim().toLowerCase();
-    if (q.length < 3) return data.items;
-    const needle = q;
-    return data.items.filter((t) => JSON.stringify(t).toLowerCase().includes(needle));
-  }, [data?.items, playerQ]);
-
+  const items = data?.items ?? [];
   const totalPages = data?.totalPages ?? 1;
 
   const Pager = ({ className }: { className?: string }) => (
@@ -198,7 +195,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
       }`}
     >
       <div>
-        Showing <span className="font-semibold text-zinc-900">{filteredItems.length}</span>
+        Showing <span className="font-semibold text-zinc-900">{items.length}</span>
         {data ? (
           <>
             {" "}
@@ -275,6 +272,24 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
     </div>
   );
 
+  const selectedPlayerChip =
+    playerId && playerQ.trim().length > 0 ? (
+      <div className="mt-2 inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700">
+        <span className="font-semibold text-zinc-900">Player:</span>
+        <span>{playerQ}</span>
+        <button
+          className="ml-1 rounded-xl px-2 py-1 text-zinc-700 hover:bg-zinc-100"
+          onClick={() => {
+            setPlayerId("");
+            setPlayerQ("");
+            setPlayerResults([]);
+          }}
+        >
+          ✕
+        </button>
+      </div>
+    ) : null;
+
   return (
     <main className="mx-auto max-w-6xl p-6 space-y-6">
       <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
@@ -325,19 +340,23 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
           />
         </div>
 
-        {/* Player search */}
+        {/* Player search (server-side) */}
         <div className="pt-2">
           <div className="text-sm font-semibold text-zinc-900">Player search</div>
           <div className="relative mt-2 max-w-xl">
             <input
               value={playerQ}
               onChange={(e) => {
-                setPlayerQ(e.target.value);
+                const next = e.target.value;
+                setPlayerQ(next);
                 setPlayerOpen(true);
+
+                // if they start typing after selecting, unset selection until they pick again
+                if (playerId) setPlayerId("");
               }}
               onFocus={() => setPlayerOpen(true)}
               onBlur={() => setTimeout(() => setPlayerOpen(false), 150)}
-              placeholder="Type 3+ chars (e.g. metchie, jefferson)…"
+              placeholder="Type 3+ chars (e.g. montgomery)…"
               className="w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-900 outline-none focus:border-zinc-900"
             />
 
@@ -360,6 +379,8 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
                         className="w-full text-left px-4 py-3 hover:bg-zinc-50"
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={() => {
+                          // ✅ selecting sets playerId -> server filters ALL transactions
+                          setPlayerId(p.id);
                           setPlayerQ(name);
                           setPlayerOpen(false);
                         }}
@@ -375,9 +396,13 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
             )}
           </div>
 
-          <div className="mt-2 text-xs text-zinc-500">
-            Filters current page rows (client-side). We can do true server-side player filtering later.
-          </div>
+          {selectedPlayerChip}
+
+          {!playerId && playerQ.trim().length >= 3 && (
+            <div className="mt-2 text-xs text-zinc-500">
+              Pick a player from the suggestions to search all league history.
+            </div>
+          )}
         </div>
       </div>
 
@@ -407,7 +432,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
           </thead>
 
           <tbody>
-            {filteredItems.map((t) => (
+            {items.map((t) => (
               <tr key={t.id} className="border-t align-top">
                 <td className="p-3 whitespace-nowrap">{t.season}</td>
                 <td className="p-3 whitespace-nowrap">{fmtDate(t.createdAt)}</td>
@@ -462,7 +487,7 @@ export default function TransactionsClient({ rootLeagueId }: { rootLeagueId: str
               </tr>
             ))}
 
-            {filteredItems.length === 0 && (
+            {items.length === 0 && (
               <tr>
                 <td className="p-6 text-zinc-600" colSpan={5}>
                   No transactions match the current filters.

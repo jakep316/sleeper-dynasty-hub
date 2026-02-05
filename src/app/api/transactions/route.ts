@@ -46,9 +46,8 @@ function csvToArray(v: string | null) {
 }
 
 /**
- * IMPORTANT FIX:
- * Even if LeagueSeason exists, it might have previousLeagueId null/incorrect.
- * We consult Sleeper if the chain would otherwise stop and upsert while walking.
+ * Walks the league "previous_league_id" chain.
+ * Uses DB first, falls back to Sleeper and upserts while walking.
  */
 async function getLeagueChain(rootLeagueId: string) {
   const leagueIds: string[] = [];
@@ -60,13 +59,11 @@ async function getLeagueChain(rootLeagueId: string) {
   while (cur && guard++ < 20) {
     leagueIds.push(cur);
 
-    // Try DB row first
     let row: LeagueSeasonRow | null = await db.leagueSeason.findFirst({
       where: { leagueId: cur },
       select: { leagueId: true, season: true, previousLeagueId: true },
     });
 
-    // If missing OR would stop chain OR season not finite, consult Sleeper
     const needsSleeper =
       !row || row.previousLeagueId === null || !Number.isFinite(Number(row.season));
 
@@ -83,12 +80,10 @@ async function getLeagueChain(rootLeagueId: string) {
         });
         row = { leagueId: cur, season, previousLeagueId: prev };
       } else {
-        // Even if season is weird, we can still continue the chain via prev.
         row = { leagueId: cur, season: NaN as any, previousLeagueId: prev };
       }
     }
 
-    // TS-safe: row can still theoretically be null (extremely rare), so guard it.
     if (!row) break;
 
     if (Number.isFinite(Number(row.season))) {
@@ -119,19 +114,37 @@ export async function GET(req: Request) {
       .map((s) => Number(s))
       .filter((n) => Number.isFinite(n));
 
+    // ✅ NEW: true server-side player filtering
+    const playerId = (url.searchParams.get("playerId") || "").trim();
+
     const { leagueIds, seasonToLeagueId } = await getLeagueChain(rootLeagueId);
     const leagues = leagueIds.length ? leagueIds : [rootLeagueId];
 
     const where: any = { leagueId: { in: leagues } };
     if (seasonsFilter.length) where.season = { in: seasonsFilter };
     if (typesFilter.length) where.type = { in: typesFilter };
+
+    // team filter
     if (teamsFilter.length) {
       where.assets = {
         some: { OR: [{ fromRosterId: { in: teamsFilter } }, { toRosterId: { in: teamsFilter } }] },
       };
     }
 
-    // Facets across ALL leagues in chain
+    // player filter (combine cleanly with existing assets filter)
+    if (playerId) {
+      const prevAssets = where.assets;
+      where.assets = {
+        some: {
+          AND: [
+            ...(prevAssets?.some ? [prevAssets.some] : []),
+            { playerId },
+          ],
+        },
+      };
+    }
+
+    // Facets across ALL leagues in chain (ignore current filters so checklist stays full)
     const [seasonRows, typeRows] = await Promise.all([
       db.transaction.findMany({
         where: { leagueId: { in: leagues } },
@@ -184,6 +197,7 @@ export async function GET(req: Request) {
       rosterIdToRootLabel.set(r.rosterId, label);
     }
 
+    // ✅ keep labels clean (no roster numbers in the UI label)
     const facetTeams: Facet[] = teamRosters.map((r) => ({
       value: String(r.rosterId),
       label: (rosterIdToRootLabel.get(r.rosterId) || `Roster ${r.rosterId}`).trim(),
@@ -211,7 +225,7 @@ export async function GET(req: Request) {
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
     // Roster labels for any (leagueId, season) in page
-    const leagueSeasonPairs = uniq(rows.map((t) => `${t.leagueId}::${t.season}`)).map((k) => {
+    const leagueSeasonPairs = uniq(rows.map((t: any) => `${t.leagueId}::${t.season}`)).map((k) => {
       const [lid, s] = k.split("::");
       return { leagueId: lid, season: Number(s) };
     });
@@ -254,7 +268,10 @@ export async function GET(req: Request) {
 
     // Player map for page
     const playerIds = uniq(
-      rows.flatMap((t: any) => t.assets).map((a: any) => a.playerId).filter((x: any) => !!x)
+      rows
+        .flatMap((t: any) => t.assets)
+        .map((a: any) => a.playerId)
+        .filter((x: any) => !!x)
     ) as string[];
 
     const players =
@@ -275,13 +292,12 @@ export async function GET(req: Request) {
       return parts.length ? `${name} (${parts.join(", ")})` : name;
     };
 
+    // ✅ Pick label: always use ORIGINAL roster_id from draft_picks
+    // ✅ Names should be based on the TRANSACTION season (not future pick season),
+    // so future picks still show correct "original owner" based on current year roster labels.
     function pickLabel(t: any, a: any) {
       const ys = typeof a.pickSeason === "number" ? a.pickSeason : null;
       const rd = typeof a.pickRound === "number" ? a.pickRound : null;
-
-      const seasonForNames = ys ?? t.season;
-      const lidForNames =
-        (ys && seasonToLeagueId.get(ys)) || seasonToLeagueId.get(t.season) || t.leagueId;
 
       const draftPicks: any[] = Array.isArray(t.rawJson?.draft_picks) ? t.rawJson.draft_picks : [];
 
@@ -291,17 +307,25 @@ export async function GET(req: Request) {
         if (!Number.isFinite(ps) || !Number.isFinite(pr)) return false;
         if (ys !== null && ps !== ys) return false;
         if (rd !== null && pr !== rd) return false;
+
+        // best-match if we can (prev->owner movement)
         const prev = p?.previous_owner_id;
         const owner = p?.owner_id;
         if (typeof a.fromRosterId === "number" && typeof a.toRosterId === "number") {
           if (prev === a.fromRosterId && owner === a.toRosterId) return true;
         }
+
+        // otherwise accept a match on season+round
         return true;
       });
 
-      const originalRoster = typeof match?.roster_id === "number" ? (match.roster_id as number) : null;
+      const originalRoster =
+        typeof match?.roster_id === "number" ? (match.roster_id as number) : null;
+
+      // names based on transaction season's league/rosters (not pick season)
+      const lidForNames = seasonToLeagueId.get(t.season) || t.leagueId;
       const originalTeam =
-        originalRoster !== null ? rosterLabel(lidForNames, seasonForNames, originalRoster) : null;
+        originalRoster !== null ? rosterLabel(lidForNames, t.season, originalRoster) : null;
 
       const prefix = originalTeam ? `(${originalTeam} pick) ` : "";
       const core = `${ys ?? "?"} R${rd ?? "?"}`;
@@ -376,8 +400,18 @@ export async function GET(req: Request) {
       const addedMap = new Map<number, { items: string[]; faab?: number }>();
       const droppedMap = new Map<number, string[]>();
 
-      const waiverBidRaw = Number(t.rawJson?.settings?.waiver_bid);
-      const waiverBid = Number.isFinite(waiverBidRaw) && waiverBidRaw > 0 ? waiverBidRaw : undefined;
+      // ✅ Waiver FAAB: Sleeper commonly uses settings.waiver_bid
+      // but be defensive.
+      const rawSettings = t.rawJson?.settings ?? {};
+      const bidCandidates = [
+        rawSettings?.waiver_bid,
+        rawSettings?.waiver_bid_amount,
+        rawSettings?.bid,
+      ]
+        .map((x: any) => Number(x))
+        .filter((n: number) => Number.isFinite(n) && n > 0);
+
+      const waiverBid = bidCandidates.length ? bidCandidates[0] : undefined;
 
       for (const a of t.assets) {
         const from = a.fromRosterId;
